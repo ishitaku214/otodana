@@ -2,16 +2,19 @@
 
 const scope = self.registration.scope;
 const cachePrefix = `otodana:${scope}:`;
-const cacheName = `${cachePrefix}v1`;
+const cacheName = `${cachePrefix}v2`;
 const index = new URL("index.html", scope).href;
 const assets = [
-  "index.html", "style.css", "app.js", "manifest.webmanifest", "icon-192.png", "icon-512.png",
+  "index.html", "style.css", "app.js", "storage.js", "artwork.js", "manifest.webmanifest",
+  "icon-192.png", "icon-512.png",
 ].map((path) => new URL(path, scope).href);
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(cacheName).then((cache) => cache.addAll(
-    assets.map((url) => new Request(url, { cache: "reload" })),
-  )));
+  event.waitUntil((async () => {
+    const cache = await caches.open(cacheName);
+    await cache.addAll(assets.map((url) => new Request(url, { cache: "reload" })));
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener("activate", (event) => {
@@ -26,8 +29,9 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   if (request.method !== "GET") return;
-  const url = request.url;
-  const key = request.mode === "navigate" && url === scope ? index : url;
+  const url = new URL(request.url);
+  if (request.mode === "navigate") url.search = "";
+  const key = url.href === scope ? index : url.href;
   if (!assets.includes(key)) return;
   event.respondWith(caches.open(cacheName).then(async (cache) => {
     return (await cache.match(key)) ?? fetch(request);

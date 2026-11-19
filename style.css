@@ -60,6 +60,7 @@ main { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); g
   cursor: pointer;
 }
 .import input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.storage-summary { margin-top: 12px; }
 .empty {
   margin-top: 20px;
   min-height: 258px;
@@ -83,9 +84,14 @@ main { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); g
 .track-select[aria-current] { color: var(--accent); background: #203c3d; }
 .track-number { color: var(--muted); min-width: 2ch; text-align: center; font-size: 13px; }
 .track-name, .song-title { overflow-wrap: anywhere; }
+.track .save, .saved { flex: 0 0 82px; font-size: 13px; text-align: center; }
+.track .save { color: var(--accent); padding: 0; }
+.saved { color: var(--muted); }
 .track .delete { flex: 0 0 49px; color: var(--muted); font-size: 13px; }
 .library-foot { margin-top: 22px; line-height: 1.6; }
 .cover {
+  position: relative;
+  overflow: hidden;
   display: grid;
   place-items: center;
   margin: 20px auto 18px;
@@ -95,6 +101,7 @@ main { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); g
   border: 1px solid #496e70;
   background: radial-gradient(circle at 20% 0, #487c75, transparent 65%), linear-gradient(140deg, #244a49, #182a41);
 }
+.cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #101a22; }
 .disc {
   display: grid;
   place-items: center;
