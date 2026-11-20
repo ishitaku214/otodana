@@ -48,27 +48,44 @@ function readPicture(frame, version) {
   return null;
 }
 
-async function readArtwork(file) {
+function readTagText(frame) {
+  const encodings = ["iso-8859-1", "utf-16le", "utf-16be", "utf-8"];
+  const marker = frame[0];
+  let encoding = encodings[marker];
+  if (!encoding || frame.length < 2 || frame.length > 8192) return "";
+  let bytes = frame.subarray(1);
+  if (marker === 1 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    encoding = "utf-16be";
+    bytes = bytes.subarray(2);
+  }
+  return new TextDecoder(encoding).decode(bytes).split("\0")[0].trim();
+}
+
+async function readTrackMetadata(file, includeArtwork = true) {
+  const metadata = { artwork: null, title: "", artist: "", album: "" };
   const header = new Uint8Array(await file.slice(0, 10).arrayBuffer());
-  if (header[0] !== 73 || header[1] !== 68 || header[2] !== 51) return null;
+  if (header[0] !== 73 || header[1] !== 68 || header[2] !== 51) return metadata;
   const version = header[3];
   const tagFlags = header[5];
-  if (version < 2 || version > 4 || (version === 2 && tagFlags & 0x40)) return null;
+  if (version < 2 || version > 4 || (version === 2 && tagFlags & 0x40)) return metadata;
   const tagSize = readSize(header, 6, 4, true);
-  if (tagSize <= 0 || tagSize > MAX_TAG_SIZE || tagSize + 10 > file.size) return null;
+  if (tagSize <= 0 || tagSize > MAX_TAG_SIZE || tagSize + 10 > file.size) return metadata;
   let tag = new Uint8Array(await file.slice(10, 10 + tagSize).arrayBuffer());
   if (version < 4 && tagFlags & 0x80) tag = undoUnsynchronization(tag);
 
   let offset = 0;
   if (version >= 3 && tagFlags & 0x40) {
     const extendedSize = readSize(tag, 0, 4, version === 4);
-    if (extendedSize < 6) return null;
+    if (extendedSize < 6) return metadata;
     offset = version === 3 ? 4 + extendedSize : extendedSize;
   }
   const idLength = version === 2 ? 3 : 4;
   const headerSize = version === 2 ? 6 : 10;
   const pictureId = version === 2 ? "PIC" : "APIC";
-  let fallback = null;
+  const textFields = version === 2
+    ? { TT2: "title", TP1: "artist", TAL: "album" }
+    : { TIT2: "title", TPE1: "artist", TALB: "album" };
+  let frontCover = false;
   while (offset + headerSize <= tag.length && tag[offset] !== 0) {
     const id = String.fromCharCode(...tag.subarray(offset, offset + idLength));
     const size = readSize(tag, offset + idLength, idLength, version === 4);
@@ -76,8 +93,9 @@ async function readArtwork(file) {
     const bodyStart = offset + headerSize;
     offset = bodyStart + size;
     if (size <= 0 || offset > tag.length) break;
-    if (id !== pictureId) continue;
-    // Compressed or encrypted attachments cannot be displayed directly.
+    const field = textFields[id];
+    if (!field && (!includeArtwork || id !== pictureId || frontCover)) continue;
+    // Compressed or encrypted frames cannot be read directly.
     if (frameFlags & (version === 3 ? 0xc0 : 0x0c)) continue;
     let frame = tag.subarray(bodyStart, offset);
     if (version === 4) {
@@ -87,9 +105,15 @@ async function readArtwork(file) {
     } else if (version === 3 && frameFlags & 0x20) {
       frame = frame.subarray(1);
     }
-    const picture = readPicture(frame, version);
-    if (picture?.type === 3) return picture.image;
-    if (!fallback && picture) fallback = picture.image;
+    if (field) {
+      if (!metadata[field]) metadata[field] = readTagText(frame);
+    } else if (!frontCover) {
+      const picture = readPicture(frame, version);
+      if (picture && (!metadata.artwork || picture.type === 3)) {
+        metadata.artwork = picture.image;
+        frontCover = picture.type === 3;
+      }
+    }
   }
-  return fallback;
+  return metadata;
 }

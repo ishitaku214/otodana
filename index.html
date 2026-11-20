@@ -3,69 +3,128 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#101a22">
+  <meta id="theme-color" name="theme-color" content="#000000">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob:; media-src blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>音棚 — MP3プレイヤー</title>
   <link rel="icon" href="icon-192.png">
   <link rel="apple-touch-icon" href="icon-192.png">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=6">
   <script src="storage.js" defer></script>
-  <script src="artwork.js" defer></script>
-  <script src="app.js" defer></script>
+  <script src="artwork.js?v=3" defer></script>
+  <script src="queue.js" defer></script>
+  <script src="app.js?v=6" defer></script>
 </head>
 <body data-view="library">
-  <header class="top">
-    <div class="brand">
-      <img src="icon-192.png" width="40" height="40" alt="">
-      <h1>音棚</h1>
-    </div>
-    <span class="app-type">MP3プレイヤー</span>
-  </header>
-  <nav class="tabs" aria-label="画面の切り替え">
-    <button type="button" id="library-tab" aria-pressed="true" aria-controls="library">曲一覧</button>
-    <button type="button" id="player-tab" aria-pressed="false" aria-controls="player">再生画面</button>
-  </nav>
-  <main>
-    <section id="library" class="panel" aria-labelledby="library-title">
-      <div class="panel-heading">
-        <div>
-          <h2 id="library-title">曲一覧</h2>
-          <p id="track-count" class="muted">0 曲</p>
+  <main class="layout">
+    <section id="library" aria-labelledby="library-title">
+      <div class="library-heading">
+        <div class="library-header">
+          <h1 id="library-title">ライブラリ</h1>
+          <label class="import">
+            <span class="plus" aria-hidden="true"></span> MP3を追加
+            <input id="file-picker" type="file" accept=".mp3,audio/mpeg" multiple aria-label="MP3を追加">
+          </label>
         </div>
-        <label class="import">
-          <span aria-hidden="true">＋</span> MP3を追加
-          <input id="file-picker" type="file" accept=".mp3,audio/mpeg" multiple aria-label="MP3を追加">
-        </label>
+        <div class="library-summary">
+          <span id="track-count">0 曲</span>
+          <span id="storage-summary">保存した曲を確認しています…</span>
+        </div>
       </div>
-      <p id="storage-summary" class="storage-summary muted">保存した曲を確認しています…</p>
+      <label class="search">
+        <span class="search-symbol" aria-hidden="true"></span>
+        <input id="search" type="search" placeholder="曲名・アーティストで検索" aria-label="曲名・アーティストで検索" autocomplete="off">
+      </label>
       <p id="library-message" class="feedback" role="status"></p>
       <div id="empty-library" class="empty">
-        <span class="empty-note" aria-hidden="true">♫</span>
-        <p>曲がありません</p>
-        <span class="muted">「MP3を追加」から曲を選んでください。</span>
+        <span class="empty-art thumb" aria-hidden="true"></span>
+        <h2 id="empty-title">曲がありません</h2>
+        <p id="empty-help">「MP3を追加」からiCloud Driveなどの曲を選べます。</p>
       </div>
       <ol id="tracks" class="tracks" aria-label="取り込んだ曲"></ol>
-      <p class="library-foot muted">次回も聴く曲は「端末に保存」を押してください。</p>
     </section>
-    <section id="player" class="panel" aria-labelledby="player-title">
-      <h2 id="player-title">再生画面</h2>
-      <div class="cover" aria-hidden="true">
-        <div class="disc"><span>♫</span></div>
-        <img id="artwork" alt="" hidden>
+
+    <section id="player" aria-label="再生画面">
+      <div id="player-backdrop" aria-hidden="true"></div>
+      <div class="player-header" id="player-header">
+        <span class="drag-handle" aria-hidden="true"></span>
+        <button type="button" id="library-tab" class="back"><span aria-hidden="true">‹</span> ライブラリ</button>
       </div>
-      <p id="now-playing" class="song-title" aria-live="polite">曲を選んでください</p>
-      <p id="position-in-list" class="muted position"></p>
-      <input id="seek" type="range" aria-label="再生位置" min="0" max="1" step="any" value="0" disabled>
-      <div class="times"><span id="elapsed">0:00</span><span id="duration">0:00</span></div>
-      <div class="transport">
-        <button type="button" id="previous" aria-label="前の曲" disabled>◀<span aria-hidden="true"> 前へ</span></button>
-        <button type="button" id="toggle" class="play" aria-label="再生" disabled><span aria-hidden="true">▶</span></button>
-        <button type="button" id="next" aria-label="次の曲" disabled><span aria-hidden="true">次へ </span>▶</button>
+      <div class="player-content">
+        <div class="player-stage">
+          <div id="artwork-stage">
+            <div class="cover" aria-hidden="true">
+              <div class="cover-pattern"><span>♫</span></div>
+              <img id="artwork" alt="" hidden>
+            </div>
+            <div class="playing-details">
+              <p id="now-playing" class="song-title" aria-live="polite">曲を選んでください</p>
+              <p id="playing-artist" class="artist" hidden></p>
+              <p id="playing-album" class="album" hidden></p>
+            </div>
+          </div>
+          <section class="queue-panel" id="queue-panel" aria-labelledby="queue-title" inert>
+            <div class="queue-history-marker"><h3 id="history-title">履歴</h3></div>
+            <section class="queue-history" aria-labelledby="history-title">
+              <ol id="history-list" class="queue-list"></ol>
+              <p id="history-empty">再生履歴はまだありません。</p>
+            </section>
+            <button type="button" class="queue-current" id="queue-current" aria-label="再生中の曲・ジャケット表示に戻る">
+              <span class="thumb" aria-hidden="true"><img id="queue-artwork" alt="" hidden></span>
+              <span class="track-copy"><span id="queue-now-title"></span><span id="queue-now-artist"></span></span>
+            </button>
+            <div class="queue-upcoming">
+              <h3 id="queue-title">次に再生</h3>
+              <ol id="queue-list" class="queue-list"></ol>
+              <p id="queue-empty">次の曲はありません。</p>
+            </div>
+          </section>
+        </div>
+        <input id="seek" class="range" type="range" aria-label="再生位置" min="0" max="1" step="any" value="0" disabled>
+        <div class="times"><span id="elapsed">0:00</span><span id="duration">−0:00</span></div>
+        <div class="transport">
+          <button type="button" id="previous" class="transport-side" aria-label="前の曲" disabled><span class="glyph previous" aria-hidden="true"></span></button>
+          <button type="button" id="toggle" class="play" aria-label="再生" disabled><span class="glyph play-glyph" aria-hidden="true"></span></button>
+          <button type="button" id="next" class="transport-side" aria-label="次の曲" disabled><span class="glyph next" aria-hidden="true"></span></button>
+        </div>
+        <div class="volume-area">
+          <label id="volume-control" class="volume-control" hidden>
+            <span class="volume-symbol" aria-hidden="true"></span>
+            <input id="volume" class="range" type="range" aria-label="音棚の音量" min="0" max="100" value="100">
+            <output id="volume-value" for="volume">100%</output>
+          </label>
+          <p id="system-volume" class="system-volume" hidden><span class="volume-symbol" aria-hidden="true"></span>本体の音量ボタンで調整</p>
+        </div>
+        <div class="player-foot">
+          <div class="player-tools">
+            <button type="button" id="shuffle-toggle" class="player-actions shuffle" aria-label="シャッフル" aria-pressed="false"><span aria-hidden="true">⤨</span></button>
+            <button type="button" id="queue-toggle" class="player-actions" aria-label="次に再生する曲を表示" aria-controls="queue-panel" aria-pressed="false" hidden><span class="queue-symbol" aria-hidden="true"></span></button>
+            <button type="button" id="player-actions" class="player-actions" aria-label="再生中の曲の操作" hidden>•••</button>
+          </div>
+        </div>
+        <p id="player-message" class="feedback player-feedback" role="status"></p>
       </div>
-      <p id="player-message" class="feedback player-feedback" role="status"></p>
       <audio id="audio" preload="metadata"></audio>
     </section>
   </main>
+
+  <aside id="mini-player" class="mini-player" aria-label="ミニプレイヤー" hidden>
+    <button type="button" id="player-tab" class="mini-open" aria-label="再生画面を開く">
+      <span class="thumb" aria-hidden="true"><img id="mini-artwork" alt="" hidden></span>
+      <span class="mini-text"><span id="mini-title"></span><span id="mini-artist"></span></span>
+    </button>
+    <button type="button" id="mini-toggle" aria-label="再生"><span class="glyph play-glyph" aria-hidden="true"></span></button>
+    <button type="button" id="mini-next" aria-label="次の曲"><span class="glyph next" aria-hidden="true"></span></button>
+    <span class="mini-progress" aria-hidden="true"></span>
+  </aside>
+
+  <p id="save-toast" class="save-toast" role="status"></p>
+
+  <dialog id="track-menu" aria-labelledby="menu-title">
+    <div class="menu-heading"><h2 id="menu-title"></h2><button type="button" id="menu-close" aria-label="閉じる">×</button></div>
+    <p id="menu-status"></p>
+    <button type="button" id="menu-save" class="save"><span aria-hidden="true">↓</span> 端末に保存</button>
+    <button type="button" id="menu-delete" class="delete"><span aria-hidden="true">−</span> 音棚から削除</button>
+  </dialog>
 </body>
 </html>
