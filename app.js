@@ -2,6 +2,17 @@
 
 const get = (id) => document.getElementById(id);
 const audio = get("audio");
+const video = get("player-video");
+const videoFullscreen = get("video-fullscreen");
+const playerCover = get("player-cover");
+let media = audio;
+const mediaFormats = {
+  mp3: "audio/mpeg",
+  mp4: "video/mp4",
+  m4v: "video/mp4",
+  mov: "video/quicktime",
+  webm: "video/webm",
+};
 const picker = get("file-picker");
 const list = get("tracks");
 const search = get("search");
@@ -10,7 +21,6 @@ const toggle = get("toggle");
 const miniToggle = get("mini-toggle");
 const miniPlayer = get("mini-player");
 const player = get("player");
-const volume = get("volume");
 const queueToggle = get("queue-toggle");
 const queuePanel = get("queue-panel");
 const queueCurrent = get("queue-current");
@@ -27,6 +37,10 @@ const newFolder = get("new-folder");
 const createFolderDialog = get("folder-create");
 const selectionBar = get("folder-selection");
 const selectionConfirm = get("selection-confirm");
+const detailsDialog = get("track-details");
+const detailsSave = get("details-save");
+const detailsImage = get("details-image");
+const folderExclude = get("folder-exclude");
 const mobile = matchMedia("(max-width: 730px)");
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 const historyScroll = { touchSide: 0, touching: false, touchUntil: 0, lastWheel: -Infinity, wheelSide: 0, wheelStopped: false };
@@ -51,6 +65,8 @@ let playRequest = 0;
 let menuTrack = null;
 let pendingDeletion = null;
 let deleting = false;
+let detailsDraft = null;
+let detailsCoverUrl = null;
 let searchRevision = 0;
 let searching = false;
 let recordedCurrent = false;
@@ -62,7 +78,8 @@ const marqueeObserver = typeof ResizeObserver === "function"
   ? new ResizeObserver((entries) => entries.forEach(({ target }) => measureMarquee(target))) : null;
 
 function syncLayout() {
-  const expanded = mobile.matches && document.body.dataset.view === "player";
+  const expanded = document.body.hasAttribute("data-video-expanded") ||
+    (mobile.matches && document.body.dataset.view === "player");
   get("library").inert = expanded;
   miniPlayer.inert = expanded;
   player.inert = mobile.matches && !expanded;
@@ -78,36 +95,15 @@ function showView(view) {
   focusTarget.focus({ preventScroll: true });
 }
 
-function setupVolume() {
-  const appleMobile = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-    (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-  let adjustable = false;
-  if (!appleMobile) {
-    const probe = document.createElement("audio");
-    try {
-      probe.volume = .5;
-      adjustable = probe.volume === .5;
-    } catch {
-      // Show the device controls if the browser does not expose volume.
-    }
-  }
-  get("volume-control").hidden = !adjustable;
-  get("system-volume").hidden = adjustable;
-  if (!adjustable) return;
-  const updateVolume = () => {
-    const percent = Math.round(audio.volume * 100);
-    volume.value = percent;
-    document.body.style.setProperty("--volume-progress", percent + "%");
-    get("volume-value").value = percent + "%";
-  };
-  volume.addEventListener("input", () => { audio.volume = volume.valueAsNumber / 100; });
-  audio.addEventListener("volumechange", updateVolume);
-  updateVolume();
-}
-
 function tellPlayer(message) {
   get("player-message").textContent = message;
   if (message && mobile.matches && document.body.dataset.view === "library") tellLibrary(message);
+}
+
+function playbackError() {
+  return isVideo(current)
+    ? "この動画を再生できません。ファイルが開けるか確認するか、H.264・AACのMP4をお試しください。"
+    : "この曲を再生できません。ファイルを確認するか、別の曲を選んでください。";
 }
 
 function formatTime(seconds) {
@@ -118,9 +114,9 @@ function formatTime(seconds) {
 }
 
 function updateTime() {
-  const canSeek = Boolean(current) && !audio.error && Number.isFinite(audio.duration) && audio.duration > 0;
-  const seconds = canSeek ? audio.currentTime : 0;
-  const duration = canSeek ? audio.duration : 0;
+  const canSeek = Boolean(current) && !media.error && Number.isFinite(media.duration) && media.duration > 0;
+  const seconds = canSeek ? media.currentTime : 0;
+  const duration = canSeek ? media.duration : 0;
   const progress = duration ? Math.min(100, seconds / duration * 100) : 0;
   document.body.style.setProperty("--progress", progress + "%");
   seek.disabled = !canSeek;
@@ -134,7 +130,7 @@ function updateTime() {
 }
 
 function updatePlayback() {
-  const playing = Boolean(current) && !audio.paused && !audio.ended && !audio.error;
+  const playing = Boolean(current) && !media.paused && !media.ended && !media.error;
   for (const button of [toggle, miniToggle]) {
     button.firstElementChild.dataset.playing = String(playing);
     button.setAttribute("aria-label", playing ? "一時停止" : "再生");
@@ -142,7 +138,23 @@ function updatePlayback() {
 }
 
 function trackTitle(track) {
-  return track?.metadata?.title || track?.title || "";
+  return track?.edits?.title || track?.metadata?.title || track?.title || "";
+}
+
+function isVideo(track) {
+  return Boolean(track?.format && track.format !== "mp3");
+}
+
+function readMediaMetadata(track, includeArtwork = true) {
+  return isVideo(track) ? Promise.resolve({}) : readTrackMetadata(track.blob, includeArtwork);
+}
+
+function trackArtist(track) {
+  return track?.edits?.artist ?? track?.metadata?.artist ?? "";
+}
+
+function trackAlbum(track) {
+  return track?.edits?.album ?? track?.metadata?.album ?? "";
 }
 
 function measureMarquee(element) {
@@ -190,8 +202,8 @@ function updateMediaMetadata() {
   if (!mediaSession || typeof MediaMetadata !== "function") return;
   mediaSession.metadata = current ? new MediaMetadata({
     title: trackTitle(current),
-    artist: current.metadata?.artist || "",
-    album: current.metadata?.album || "",
+    artist: trackArtist(current),
+    album: trackAlbum(current),
     artwork: artworkUrl ? [{ src: artworkUrl }] : [],
   }) : null;
 }
@@ -220,7 +232,7 @@ function renderQueue(anchor = false) {
   cancelQueueGesture();
   const scroll = queuePanel.scrollTop;
   setMarquee(get("queue-now-title"), trackTitle(current));
-  setMarquee(get("queue-now-artist"), current?.metadata?.artist, true);
+  setMarquee(get("queue-now-artist"), trackArtist(current), true);
   const history = recordedCurrent ? queue.history.slice(0, -1) : queue.history;
   const historyRows = history.map((track) => {
     const row = document.createElement("li");
@@ -367,16 +379,21 @@ function showQueue(visible) {
 
 function updateSelection() {
   const title = trackTitle(current);
-  const artist = current?.metadata?.artist;
+  const artist = trackArtist(current);
   setMarquee(get("now-playing"), title || "曲を選んでください");
   setMarquee(get("playing-artist"), artist);
-  setMarquee(get("playing-album"), current?.metadata?.album);
+  setMarquee(get("playing-album"), trackAlbum(current));
   setMarquee(get("mini-title"), title);
   setMarquee(get("mini-artist"), artist, true);
   get("previous").disabled = !current || !queue.previous.length;
   get("next").disabled = !current || !queue.upcoming.length;
   get("mini-next").disabled = get("next").disabled;
   toggle.disabled = !current;
+  video.hidden = !isVideo(current);
+  playerCover.hidden = !video.hidden;
+  player.toggleAttribute("data-video", !video.hidden);
+  videoFullscreen.hidden = video.hidden;
+  videoFullscreen.disabled = !video.videoWidth;
   miniPlayer.hidden = !current;
   queueToggle.hidden = !current;
   shuffleToggle.setAttribute("aria-pressed", String(queue.shuffled));
@@ -402,13 +419,13 @@ async function play() {
   const request = ++playRequest;
   tellPlayer("");
   try {
-    if (audio.error) audio.load();
-    await audio.play();
+    if (media.error) media.load();
+    await media.play();
   } catch (error) {
     if (request !== playRequest) return;
     tellPlayer(error.name === "NotAllowedError"
       ? "再生ボタンを押して再生を始めてください。"
-      : "この曲を再生できません。ファイルを確認するか、別の曲を選んでください。");
+      : playbackError());
     updatePlayback();
   }
 }
@@ -420,6 +437,7 @@ function clearArtwork() {
     image.removeAttribute("src");
   }
   if (artworkUrl) URL.revokeObjectURL(artworkUrl);
+  video.removeAttribute("poster");
   artworkUrl = null;
 }
 
@@ -451,11 +469,12 @@ function setBackdrop(image) {
   });
 }
 
-function clearSource() {
+function clearSource(nextMedia = audio) {
   ++playRequest;
-  audio.pause();
-  audio.removeAttribute("src");
-  audio.load();
+  media.pause();
+  if (media === video && nextMedia !== video) closeVideoExpanded();
+  media.removeAttribute("src");
+  media.load();
   if (objectUrl) URL.revokeObjectURL(objectUrl);
   objectUrl = null;
   clearArtwork();
@@ -502,18 +521,20 @@ function updateTrackMetadata(track, metadata) {
 async function showArtwork(track) {
   const request = artworkRequest;
   try {
-    const metadata = await readTrackMetadata(track.blob);
+    const metadata = await readMediaMetadata(track);
     if (request !== artworkRequest) return;
     updateTrackMetadata(track, metadata);
-    if (!metadata.artwork) {
+    const cover = track.edits?.cover ?? metadata.artwork;
+    if (!cover) {
       setBackdrop(null);
       return;
     }
-    artworkUrl = URL.createObjectURL(metadata.artwork);
+    artworkUrl = URL.createObjectURL(cover);
     artwork.src = artworkUrl;
     await artwork.decode();
     if (request !== artworkRequest) return;
     artwork.hidden = false;
+    if (isVideo(track)) video.poster = artworkUrl;
     miniArtwork.src = artworkUrl;
     miniArtwork.hidden = false;
     queueArtwork.src = artworkUrl;
@@ -542,14 +563,17 @@ function selectTrack(track, followQueue = false) {
     queue.start(folder?.tracks ?? rootTracks(), track);
   }
   if (current !== track) {
-    clearSource();
+    const nextMedia = isVideo(track) ? video : audio;
+    clearSource(nextMedia);
     current = track;
+    media = nextMedia;
     recordedCurrent = false;
     objectUrl = URL.createObjectURL(track.blob);
-    audio.src = objectUrl;
+    media.src = objectUrl;
     showArtwork(track);
-  } else if (audio.ended) {
-    audio.currentTime = 0;
+  } else if (media.ended) {
+    recordedCurrent = false;
+    media.currentTime = 0;
   }
   tellLibrary("");
   updateSelection();
@@ -566,8 +590,11 @@ function move(offset) {
 
 function togglePlayback() {
   if (!current) return;
-  if (audio.paused || audio.ended || audio.error) {
-    if (audio.ended) audio.currentTime = 0;
+  if (media.paused || media.ended || media.error) {
+    if (media.ended) {
+      recordedCurrent = false;
+      media.currentTime = 0;
+    }
     play();
   } else {
     pause();
@@ -576,17 +603,17 @@ function togglePlayback() {
 
 function pause() {
   ++playRequest;
-  audio.pause();
+  media.pause();
 }
 
 function tellLibrary(message) {
   get("library-message").textContent = message;
 }
 
-function showSaveToast(saved) {
+function showSaveToast(saved, unit = "曲") {
   const toast = get("save-toast");
   clearTimeout(saveToastTimer);
-  toast.textContent = saved + "曲を追加して端末に保存しました。";
+  toast.textContent = saved + unit + "を追加して端末に保存しました。";
   toast.dataset.visible = "";
   saveToastTimer = setTimeout(() => {
     delete toast.dataset.visible;
@@ -633,11 +660,20 @@ async function restoreTracks() {
   try {
     const connection = await trackStore.open();
     try {
-      const [saved, layout] = await Promise.all([
+      const [saved, layout, details] = await Promise.all([
         trackStore.run(connection, "readonly", (store) => store.getAll()),
         trackStore.run(connection, "readonly", (store) => store.get("library"), "settings"),
+        trackStore.run(connection, "readonly", (store) => store.getAll(), "trackDetails"),
       ]);
       const savedById = new Map(saved.map((track) => [track.id, track]));
+      for (const entry of details) {
+        const track = savedById.get(entry.id);
+        if (track) {
+          track.edits = entry.edits;
+          track.plays = entry.plays;
+          track.lastPlayed = entry.lastPlayed;
+        }
+      }
       if (layout) {
         const order = new Map(layout.order.map((id, index) => [id, index]));
         saved.sort((first, second) => (order.get(first.id) ?? Infinity) - (order.get(second.id) ?? Infinity) || first.id - second.id);
@@ -704,9 +740,34 @@ async function saveTrack(track) {
 }
 
 async function persistTrack(track) {
-  const { blob, title } = track;
-  track.id = await trackStore.run(database, "readwrite", (store) => store.add({ blob, title }));
+  const { blob, title, filename, addedAt, format } = track;
+  track.id = await trackStore.run(database, "readwrite", (store) => store.add({ blob, title, filename, addedAt, format }));
+  const { edits, plays, lastPlayed } = track;
+  if (edits || plays) trackStore.updateDetails(database, track.id, (details) => {
+    Object.assign(details, { edits, plays, lastPlayed });
+  }).catch(() => trackFeedback(track, "曲の情報を保存できませんでした。"));
   if (queue.history.includes(track)) saveHistory();
+}
+
+async function saveDownloadedMedia(blob, filename, format) {
+  await storageReady;
+  if (!database) throw new Error("このブラウザでは端末保存を利用できません。");
+  const title = filename.slice(0, -(format.length + 1));
+  const track = { blob, title, filename, format, addedAt: Date.now() };
+  try {
+    await persistTrack(track);
+  } catch (error) {
+    throw new Error(error?.name === "QuotaExceededError"
+      ? "端末の空き容量が足りません。空き容量を増やしてお試しください。"
+      : "端末に保存できませんでした。音棚を開き直してお試しください。");
+  }
+  tracks.push(track);
+  if (current && !playbackFolder) queue.append([track]);
+  if (customTrackOrder) persistLibrary();
+  search.value = "";
+  tellLibrary("");
+  filterLibrary();
+  showSaveToast(1, format === "mp4" ? "件" : "曲");
 }
 
 async function saveImportedTracks(added, invalid) {
@@ -733,7 +794,7 @@ async function saveImportedTracks(added, invalid) {
     failed ? failed + "曲は端末に保存できませんでした。この画面では再生できます。" : "",
     failed && (full ? "空き容量を増やしてから「端末に保存」で再試行できます。" :
       database ? "曲の「端末に保存」から再試行できます。" : "音棚を開き直してから再試行してください。"),
-    invalid ? invalid + "件は追加できませんでした。空でないMP3を選んでください。" : "",
+    invalid ? invalid + "件は追加できませんでした。対応する音楽・動画ファイルを選んでください。" : "",
   ];
   tellLibrary(message.filter(Boolean).join(" "));
   if (saved) showSaveToast(saved);
@@ -745,7 +806,7 @@ async function deleteTrack(track) {
     track.busy = "delete";
     renderTracks();
     try {
-      await trackStore.run(database, "readwrite", (store) => store.delete(track.id));
+      await trackStore.deleteTrack(database, track.id);
     } catch {
       track.busy = null;
       renderTracks();
@@ -785,6 +846,7 @@ function setDeleteMode(enabled) {
   deleting = enabled;
   list.toggleAttribute("data-deleting", enabled);
   deleteMode.textContent = enabled ? "完了" : "編集";
+  folderExclude.hidden = !enabled || !activeFolder;
   cancelLibraryGesture();
 }
 
@@ -795,6 +857,7 @@ function openTrackMenu(track) {
   const saved = track.id !== undefined;
   get("menu-status").textContent = saved ? "端末に保存済み" : "このセッションで再生できます";
   get("menu-add").hidden = true;
+  get("menu-details").hidden = false;
   get("menu-delete").hidden = false;
   get("menu-save").hidden = saved;
   get("menu-save").disabled = !database || Boolean(track.busy);
@@ -818,13 +881,128 @@ function closeTrackMenu(afterClose) {
   }
 }
 
+function displayDetailsDate(value) {
+  return value ? new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "short" }).format(value) : "—";
+}
+
+function updateDetailsStats(track) {
+  get("details-plays").textContent = (track.plays ?? 0).toLocaleString("ja") + "回";
+  get("details-last").textContent = displayDetailsDate(track.lastPlayed);
+}
+
+function previewDetailsCover(draft) {
+  if (detailsCoverUrl) URL.revokeObjectURL(detailsCoverUrl);
+  const image = get("details-artwork");
+  const cover = draft.cover ?? draft.originalCover;
+  detailsCoverUrl = cover ? URL.createObjectURL(cover) : null;
+  if (detailsCoverUrl) image.src = detailsCoverUrl;
+  else image.removeAttribute("src");
+  image.hidden = !detailsCoverUrl;
+  get("details-reset-cover").hidden = !draft.cover;
+}
+
+function readDetailsDuration(draft) {
+  const { track } = draft;
+  const show = (duration) => {
+    if (detailsDraft === draft && Number.isFinite(duration) && duration > 0) {
+      get("details-duration").textContent = formatTime(duration);
+    }
+  };
+  if (current === track && Number.isFinite(media.duration)) {
+    show(media.duration);
+    return;
+  }
+  const probe = document.createElement(isVideo(track) ? "video" : "audio");
+  const url = URL.createObjectURL(track.blob);
+  const finish = () => {
+    show(probe.duration);
+    clearTimeout(timer);
+    probe.onloadedmetadata = probe.onerror = null;
+    probe.removeAttribute("src");
+    probe.load();
+    URL.revokeObjectURL(url);
+  };
+  const timer = setTimeout(finish, 5000);
+  probe.preload = "metadata";
+  probe.onloadedmetadata = probe.onerror = finish;
+  probe.src = url;
+}
+
+async function openTrackDetails(track) {
+  if (!tracks.includes(track) || detailsDialog.open) return;
+  const draft = { track, cover: track.edits?.cover ?? null, coverRequest: 0 };
+  detailsDraft = draft;
+  get("details-form").reset();
+  get("details-message").textContent = "";
+  get("details-duration").textContent = "—";
+  get("details-added").textContent = displayDetailsDate(track.addedAt);
+  get("details-file").textContent = track.filename ?? track.title + ".mp3";
+  const size = track.blob.size;
+  const unit = size >= 1_000_000 ? "MB" : "KB";
+  const amount = new Intl.NumberFormat("ja", { maximumFractionDigits: 2 }).format(size / (unit === "MB" ? 1_000_000 : 1000));
+  get("details-size").textContent = (track.format ?? "mp3").toUpperCase() + " · " + amount + " " + unit;
+  updateDetailsStats(track);
+  previewDetailsCover(draft);
+  get("details-name").value = trackTitle(track);
+  get("details-artist").value = trackArtist(track);
+  get("details-album").value = trackAlbum(track);
+  get("details-form").inert = true;
+  detailsImage.disabled = true;
+  detailsDialog.showModal();
+  readDetailsDuration(draft);
+  const metadata = await readMediaMetadata(track).catch(() => ({}));
+  if (detailsDraft !== draft) return;
+  updateTrackMetadata(track, metadata);
+  draft.originalCover = metadata.artwork;
+  previewDetailsCover(draft);
+  get("details-name").value = trackTitle(track);
+  get("details-artist").value = trackArtist(track);
+  get("details-album").value = trackAlbum(track);
+  get("details-form").inert = false;
+  detailsSave.disabled = Boolean(track.busy);
+  detailsImage.disabled = Boolean(track.busy);
+}
+
+async function resizeCover(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const scale = Math.min(1, 768 / Math.max(image.naturalWidth, image.naturalHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", .87));
+    if (!blob) throw new Error("Artwork encoding failed");
+    return blob;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function recordPlay(track) {
+  const time = Date.now();
+  track.plays = (track.plays ?? 0) + 1;
+  track.lastPlayed = time;
+  if (detailsDraft?.track === track) updateDetailsStats(track);
+  if (track.id !== undefined && track.busy !== "delete") {
+    trackStore.updateDetails(database, track.id, (details) => {
+      details.plays = (details.plays ?? 0) + 1;
+      details.lastPlayed = Math.max(time, details.lastPlayed ?? 0);
+    }).catch(() => {});
+  }
+}
+
 async function loadTrackPreview(track) {
   try {
-    const metadata = await readTrackMetadata(track.blob);
+    const metadata = await readMediaMetadata(track);
     updateTrackMetadata(track, metadata);
-    if (!metadata.artwork || !tracks.includes(track)) return;
+    const cover = track.edits?.cover ?? metadata.artwork;
+    if (!cover || !tracks.includes(track)) return;
     const image = new Image();
-    const url = URL.createObjectURL(metadata.artwork);
+    const url = URL.createObjectURL(cover);
     try {
       image.src = url;
       await image.decode();
@@ -850,7 +1028,7 @@ function updateTrackRow(row) {
   const title = trackTitle(track);
   row.querySelector(".track-name").textContent = title;
   const artist = row.querySelector(".track-artist");
-  artist.textContent = track.metadata?.artist || track.metadata?.album || "";
+  artist.textContent = trackArtist(track) || trackAlbum(track) || (isVideo(track) ? track.format.toUpperCase() + " 動画" : "");
   artist.hidden = !artist.textContent;
   row.querySelector(".more").setAttribute("aria-label", title + "の操作");
   row.querySelector(".track-delete").setAttribute("aria-label", title + "を削除");
@@ -921,6 +1099,7 @@ function openFolderMenu(folder) {
   get("menu-title").textContent = folder.name;
   get("menu-status").textContent = folder.tracks.length + " 曲";
   get("menu-add").hidden = false;
+  get("menu-details").hidden = true;
   get("menu-save").hidden = true;
   get("menu-delete").hidden = true;
   menu.showModal();
@@ -981,10 +1160,12 @@ function renderTracks() {
   thumbnailObserver?.disconnect();
   newFolder.disabled = !database;
   newFolder.hidden = Boolean(activeFolder || folderSelection);
+  list.toggleAttribute("data-folder", Boolean(activeFolder));
   deleteMode.hidden = Boolean(folderSelection);
   get("folder-back").hidden = !activeFolder || Boolean(folderSelection);
   get("storage-summary").hidden = Boolean(activeFolder);
   picker.closest(".import").hidden = Boolean(activeFolder || folderSelection);
+  get("download-open").hidden = Boolean(activeFolder || folderSelection);
   list.replaceChildren();
   const query = search.value.trim().normalize("NFKC").toLocaleLowerCase("ja");
   renderFolders(query);
@@ -992,7 +1173,7 @@ function renderTracks() {
   deleteMode.disabled = !libraryTracks.length;
   selectionConfirm.disabled = !folderSelection?.chosen.size;
   if (deleteMode.disabled && deleting) setDeleteMode(false);
-  const matches = libraryTracks.filter((track) => !query || [track.title, track.metadata?.title, track.metadata?.artist]
+  const matches = libraryTracks.filter((track) => !query || [track.title, trackTitle(track), trackArtist(track), trackAlbum(track)]
     .some((value) => value && containsQuery(value, query)));
   for (const track of matches) {
     const row = document.createElement("li");
@@ -1051,7 +1232,7 @@ function renderTracks() {
   get("empty-title").textContent = searching ? "曲を検索しています…" : query ? "該当する曲がありません" : "曲がありません";
   get("empty-help").textContent = searching ? "" : query
     ? "別の曲名やアーティスト名で探してください。"
-    : activeFolder ? "ライブラリでフォルダの「•••」から曲を追加できます。" : "「MP3を追加」からiCloud Driveなどの曲を選べます。";
+    : activeFolder ? "ライブラリでフォルダの「•••」から曲を追加できます。" : "「ファイルを追加」からiCloud Driveなどの音楽や動画を選べます。";
   get("track-count").textContent = query ? matches.length + " / " + libraryTracks.length + " 曲" : libraryTracks.length + " 曲";
   updateStorageSummary();
   updateSelection();
@@ -1065,7 +1246,7 @@ async function filterLibrary() {
   for (const track of unchecked) {
     if (revision !== searchRevision) return;
     if (track.metadata || !tracks.includes(track)) continue;
-    track.searchMetadata ??= track.preview ?? readTrackMetadata(track.blob, false)
+    track.searchMetadata ??= track.preview ?? readMediaMetadata(track, false)
       .then((metadata) => updateTrackMetadata(track, metadata))
       .catch(() => { track.metadata = {}; });
     await track.searchMetadata;
@@ -1080,12 +1261,14 @@ picker.addEventListener("change", () => {
   const added = [];
   let invalid = 0;
   for (const file of picker.files) {
-    if (!/\.mp3$/i.test(file.name) || file.size === 0) {
+    const extension = /\.([a-z0-9]+)$/i.exec(file.name);
+    const format = extension?.[1].toLowerCase();
+    if (!Object.hasOwn(mediaFormats, format) || file.size === 0) {
       ++invalid;
       continue;
     }
-    const title = file.name.slice(0, -4).trim() || file.name;
-    added.push({ blob: file.slice(0, file.size, "audio/mpeg"), title, busy: "save" });
+    const title = file.name.slice(0, extension.index).trim() || file.name;
+    added.push({ blob: file.slice(0, file.size, mediaFormats[format]), title, filename: file.name, addedAt: Date.now(), format, busy: "save" });
   }
   picker.value = "";
   if (added.length) {
@@ -1096,7 +1279,7 @@ picker.addEventListener("change", () => {
     tellLibrary(added.length + "曲を端末に保存しています…");
     importQueue = importQueue.then(() => saveImportedTracks(added, invalid));
   } else if (invalid) {
-    tellLibrary(invalid + "件は追加できませんでした。空でないMP3を選んでください。");
+    tellLibrary(invalid + "件は追加できませんでした。MP3、MP4、M4V、MOV、WebMのファイルを選んでください。");
   }
 });
 
@@ -1125,6 +1308,7 @@ const cancelLibraryGesture = bindQueueGestures(list, document.scrollingElement, 
     for (const row of folderList.children) row.toggleAttribute("data-drop-target", row === destination);
   },
   drop(track, event) {
+    if (activeFolder) return false;
     if (track.folder) return true;
     const destination = folderAtPointer(event);
     if (!destination) return false;
@@ -1133,26 +1317,26 @@ const cancelLibraryGesture = bindQueueGestures(list, document.scrollingElement, 
   },
   reorder(track, target) {
     const neighbor = list.children[target];
-    if (!deleting || activeFolder || !neighbor || neighbor.track === track) return;
+    if (!deleting || !neighbor || neighbor.track === track) return;
     const row = Array.from(list.children).find((entry) => entry.track === track);
-    const from = tracks.indexOf(track);
-    const to = tracks.indexOf(neighbor.track);
-    tracks.splice(from, 1);
-    tracks.splice(to, 0, track);
+    const order = activeFolder?.tracks ?? tracks;
+    const from = order.indexOf(track);
+    const to = order.indexOf(neighbor.track);
+    if (from < 0 || to < 0) return;
+    order.splice(from, 1);
+    order.splice(to, 0, track);
     if (from < to) neighbor.after(row);
     else neighbor.before(row);
-    customTrackOrder = true;
+    if (!activeFolder) customTrackOrder = true;
     persistLibrary();
-    if (current && !playbackFolder && !current.folder && !queue.shuffled) {
-      queue.start(rootTracks(), current);
+    if (current && playbackFolder === activeFolder && (current.folder ?? null) === activeFolder && !queue.shuffled) {
+      queue.start(activeFolder?.tracks ?? rootTracks(), current);
       updateSelection();
     }
   },
 }, reducedMotion);
-deleteMode.addEventListener("click", () => {
-  if (activeFolder) setFolderSelection(activeFolder, true);
-  else setDeleteMode(!deleting);
-});
+deleteMode.addEventListener("click", () => setDeleteMode(!deleting));
+folderExclude.addEventListener("click", () => setFolderSelection(activeFolder, true));
 get("folder-back").addEventListener("click", () => showFolder(null));
 const folderName = get("folder-name");
 newFolder.addEventListener("click", () => {
@@ -1218,7 +1402,7 @@ let playerDragFrame = 0;
 let clearPlayerMorph = null;
 
 function startPlayerMorph(height) {
-  if (reducedMotion.matches || miniPlayer.hidden) return null;
+  if (reducedMotion.matches || miniPlayer.hidden || media === video) return null;
   const source = player.dataset.queue === "true" ? queueCurrent.querySelector(".thumb") : get("artwork-stage").querySelector(".cover");
   const target = miniPlayer.querySelector(".thumb");
   const from = source.getBoundingClientRect();
@@ -1226,6 +1410,7 @@ function startPlayerMorph(height) {
   const card = miniPlayer.getBoundingClientRect();
   if (!from.width || !to.width) return null;
   const jacket = source.cloneNode(true);
+  jacket.removeAttribute("id");
   jacket.querySelector("img")?.removeAttribute("id");
   jacket.classList.add("moving-jacket");
   jacket.setAttribute("aria-hidden", "true");
@@ -1369,6 +1554,91 @@ get("menu-add").addEventListener("click", () => {
   const folder = menuFolder;
   if (folder) closeTrackMenu(() => setFolderSelection(folder));
 });
+get("menu-details").addEventListener("click", () => {
+  const track = menuTrack;
+  if (track) closeTrackMenu(() => openTrackDetails(track));
+});
+detailsDialog.addEventListener("cancel", (event) => {
+  if (detailsDraft?.saving) event.preventDefault();
+});
+get("details-cancel").addEventListener("click", () => detailsDialog.close());
+detailsDialog.addEventListener("close", () => {
+  if (detailsDialog.open) return;
+  detailsDraft = null;
+  if (detailsCoverUrl) URL.revokeObjectURL(detailsCoverUrl);
+  detailsCoverUrl = null;
+  get("details-artwork").removeAttribute("src");
+});
+detailsImage.addEventListener("change", async () => {
+  const draft = detailsDraft;
+  const file = detailsImage.files[0];
+  detailsImage.value = "";
+  if (!draft || !file || draft.saving) return;
+  const request = ++draft.coverRequest;
+  const feedback = get("details-message");
+  feedback.textContent = "";
+  detailsSave.disabled = true;
+  try {
+    const cover = await resizeCover(file);
+    if (detailsDraft !== draft || request !== draft.coverRequest) return;
+    draft.cover = cover;
+    previewDetailsCover(draft);
+  } catch {
+    if (detailsDraft === draft && request === draft.coverRequest) {
+      feedback.textContent = "この画像を開けませんでした。別の画像を選んでください。";
+    }
+  } finally {
+    if (detailsDraft === draft && request === draft.coverRequest) detailsSave.disabled = Boolean(draft.track.busy);
+  }
+});
+get("details-reset-cover").addEventListener("click", () => {
+  const draft = detailsDraft;
+  if (!draft || draft.saving) return;
+  ++draft.coverRequest;
+  draft.cover = null;
+  previewDetailsCover(draft);
+  detailsSave.disabled = Boolean(draft.track.busy);
+  get("details-message").textContent = "";
+});
+get("details-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const draft = detailsDraft;
+  const track = draft?.track;
+  if (!track || track.busy || detailsSave.disabled || !tracks.includes(track)) return;
+  const edits = {
+    title: get("details-name").value.trim(),
+    artist: get("details-artist").value.trim(),
+    album: get("details-album").value.trim(),
+    cover: draft.cover,
+  };
+  const changedCover = edits.cover !== (track.edits?.cover ?? null);
+  draft.saving = true;
+  detailsSave.disabled = detailsImage.disabled = get("details-cancel").disabled = true;
+  try {
+    if (track.id !== undefined) {
+      await trackStore.updateDetails(database, track.id, (details) => { details.edits = edits; });
+    }
+    track.edits = edits;
+    if (changedCover) {
+      await track.preview;
+      if (track.thumbnail) URL.revokeObjectURL(track.thumbnail);
+      track.thumbnail = null;
+      track.preview = loadTrackPreview(track);
+      if (current === track) {
+        clearArtwork();
+        showArtwork(track);
+      }
+    }
+    detailsDialog.close();
+    filterLibrary();
+    if (track.id === undefined) tellLibrary("曲を端末に保存すると、編集内容も次回に引き継がれます。");
+  } catch {
+    get("details-message").textContent = "編集内容を保存できませんでした。空き容量を確認して、もう一度「保存」を押してください。";
+  } finally {
+    draft.saving = false;
+    detailsSave.disabled = detailsImage.disabled = get("details-cancel").disabled = false;
+  }
+});
 get("menu-delete").addEventListener("click", () => {
   const track = menuTrack;
   if (track) closeTrackMenu(() => confirmDeletion(track));
@@ -1388,43 +1658,95 @@ toggle.addEventListener("click", () => {
 });
 miniToggle.addEventListener("click", togglePlayback);
 seek.addEventListener("input", () => {
-  if (!seek.disabled) audio.currentTime = seek.valueAsNumber;
+  if (!seek.disabled) media.currentTime = seek.valueAsNumber;
 });
 
+function setVideoExpanded(expanded) {
+  document.body.toggleAttribute("data-video-expanded", expanded);
+  videoFullscreen.textContent = expanded ? "全画面を閉じる" : "動画を全画面";
+  syncLayout();
+}
+
+function closeVideoExpanded() {
+  if (!document.body.hasAttribute("data-video-expanded")) return;
+  setVideoExpanded(false);
+  if (document.fullscreenElement === player) document.exitFullscreen().catch(() => {});
+}
+
+videoFullscreen.addEventListener("click", async () => {
+  if (media !== video || !video.videoWidth) return;
+  if (document.body.hasAttribute("data-video-expanded")) {
+    closeVideoExpanded();
+    return;
+  }
+  if (player.dataset.queue === "true") showQueue(false);
+  setVideoExpanded(true);
+  if (document.fullscreenEnabled && typeof player.requestFullscreen === "function") {
+    try {
+      await player.requestFullscreen();
+      if (!document.body.hasAttribute("data-video-expanded") && document.fullscreenElement === player) {
+        await document.exitFullscreen();
+      }
+    } catch {
+      // Keep the app's full-viewport layout if browser fullscreen is unavailable.
+    }
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !document.body.hasAttribute("data-video-expanded")) return;
+  closeVideoExpanded();
+  videoFullscreen.focus({ preventScroll: true });
+});
+player.addEventListener("fullscreenchange", () => {
+  if (document.fullscreenElement !== player && document.body.hasAttribute("data-video-expanded")) setVideoExpanded(false);
+});
+video.addEventListener("loadedmetadata", () => {
+  if (media === video) videoFullscreen.disabled = !video.videoWidth;
+});
+
+function onActiveMedia(event, handler) {
+  for (const element of [audio, video]) {
+    element.addEventListener(event, () => {
+      if (media === element) handler();
+    });
+  }
+}
+
 for (const event of ["loadedmetadata", "durationchange", "timeupdate", "seeked"]) {
-  audio.addEventListener(event, updateTime);
+  onActiveMedia(event, updateTime);
 }
 for (const event of ["play", "playing", "pause"]) {
-  audio.addEventListener(event, updatePlayback);
+  onActiveMedia(event, updatePlayback);
 }
-audio.addEventListener("playing", () => {
+onActiveMedia("playing", () => {
   if (!current || recordedCurrent) return;
   recordedCurrent = true;
+  recordPlay(current);
   queue.record(current);
   saveHistory();
   if (player.dataset.queue === "true") renderQueue(true);
 });
-audio.addEventListener("ended", () => {
-  if (!audio.ended || !current) return;
+onActiveMedia("ended", () => {
+  if (!media.ended || !current) return;
   if (!move(1)) {
     updatePlayback();
     tellPlayer("一覧の最後まで再生しました。");
   }
 });
-audio.addEventListener("error", () => {
-  if (!current || !audio.error) return;
-  tellPlayer("この曲を再生できません。ファイルを確認するか、別の曲を選んでください。");
+onActiveMedia("error", () => {
+  if (!current || !media.error) return;
+  tellPlayer(playbackError());
   updatePlayback();
   updateTime();
 });
 
 syncLayout();
-setupVolume();
 const storageReady = restoreTracks();
+setupMediaDownloads(saveDownloadedMedia);
 
 if (mediaSession) {
   const actions = {
-    play: () => { if (audio.paused || audio.ended) togglePlayback(); },
+    play: () => { if (media.paused || media.ended) togglePlayback(); },
     pause,
     previoustrack: () => move(-1),
     nexttrack: () => move(1),

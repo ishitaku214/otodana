@@ -3,10 +3,11 @@
 const trackStore = {
   async open() {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open("otodana-library", 2);
+      const request = indexedDB.open("otodana-library", 3);
       request.onupgradeneeded = ({ oldVersion }) => {
         if (oldVersion === 0) request.result.createObjectStore("tracks", { keyPath: "id", autoIncrement: true });
-        request.result.createObjectStore("settings");
+        if (oldVersion < 2) request.result.createObjectStore("settings");
+        request.result.createObjectStore("trackDetails", { keyPath: "id" });
       };
       request.onsuccess = () => {
         const database = request.result;
@@ -23,6 +24,38 @@ const trackStore = {
       const request = operation(transaction.objectStore(store));
       transaction.oncomplete = () => resolve(request.result);
       transaction.onabort = () => reject(transaction.error ?? request.error);
+    });
+  },
+
+  updateDetails(database, id, update) {
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(["tracks", "trackDetails"], "readwrite");
+      const store = transaction.objectStore("trackDetails");
+      const exists = transaction.objectStore("tracks").getKey(id);
+      exists.onsuccess = () => {
+        if (exists.result === undefined) {
+          transaction.abort();
+          return;
+        }
+        const request = store.get(id);
+        request.onsuccess = () => {
+          const details = request.result ?? { id };
+          update(details);
+          store.put(details);
+        };
+      };
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => reject(transaction.error);
+    });
+  },
+
+  deleteTrack(database, id) {
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(["tracks", "trackDetails"], "readwrite");
+      transaction.objectStore("tracks").delete(id);
+      transaction.objectStore("trackDetails").delete(id);
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => reject(transaction.error);
     });
   },
 };
