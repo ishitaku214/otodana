@@ -20,12 +20,25 @@ const queueArtwork = get("queue-artwork");
 const artwork = get("artwork");
 const miniArtwork = get("mini-artwork");
 const menu = get("track-menu");
+const deleteMode = get("delete-mode");
+const deleteDialog = get("delete-dialog");
+const folderList = get("folders");
+const newFolder = get("new-folder");
+const createFolderDialog = get("folder-create");
+const selectionBar = get("folder-selection");
+const selectionConfirm = get("selection-confirm");
 const mobile = matchMedia("(max-width: 730px)");
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 const historyScroll = { touchSide: 0, touching: false, touchUntil: 0, lastWheel: -Infinity, wheelSide: 0, wheelStopped: false };
 let queueSettleTimer;
 const mediaSession = navigator.mediaSession;
 const tracks = [];
+const folders = [];
+let activeFolder = null;
+let playbackFolder = null;
+let menuFolder = null;
+let folderSelection = null;
+let customTrackOrder = false;
 const queue = new PlaybackQueue();
 const historyKey = "otodana-playback-history";
 let database = null;
@@ -36,12 +49,17 @@ let artworkUrl = null;
 let artworkRequest = 0;
 let playRequest = 0;
 let menuTrack = null;
+let pendingDeletion = null;
+let deleting = false;
 let searchRevision = 0;
 let searching = false;
 let recordedCurrent = false;
 let backdrop = null;
 let importQueue = Promise.resolve();
 let saveToastTimer;
+const marqueeRows = new WeakMap();
+const marqueeObserver = typeof ResizeObserver === "function"
+  ? new ResizeObserver((entries) => entries.forEach(({ target }) => measureMarquee(target))) : null;
 
 function syncLayout() {
   const expanded = mobile.matches && document.body.dataset.view === "player";
@@ -127,10 +145,45 @@ function trackTitle(track) {
   return track?.metadata?.title || track?.title || "";
 }
 
-function setOptionalText(id, value) {
-  const element = get(id);
-  element.textContent = value || "";
-  element.hidden = !value;
+function measureMarquee(element) {
+  const entry = marqueeRows.get(element);
+  if (!entry || !element.clientWidth) return;
+  const style = getComputedStyle(element);
+  const width = element.clientWidth - parseFloat(style.paddingInlineStart) - parseFloat(style.paddingInlineEnd);
+  const textWidth = Math.ceil(entry.text.getBoundingClientRect().width);
+  const overflow = textWidth > width + 1;
+  if (overflow && !entry.track.lastElementChild.hasAttribute("aria-hidden")) {
+    const copy = entry.text.cloneNode(true);
+    copy.setAttribute("aria-hidden", "true");
+    entry.track.append(copy);
+  } else if (!overflow && entry.track.children.length > 1) {
+    entry.track.lastElementChild.remove();
+  }
+  entry.track.style.setProperty("--marquee-distance", -(textWidth + 32) + "px");
+  entry.track.style.setProperty("--marquee-duration", ((textWidth + 32) / 25 + 2) + "s");
+  element.classList.toggle("marquee-overflow", overflow);
+}
+
+function setMarquee(element, value, optional = false) {
+  const label = value || "";
+  if (optional) element.hidden = !label;
+  if (marqueeRows.get(element)?.label === label) return;
+  const track = document.createElement("span");
+  track.className = "marquee-track";
+  const text = document.createElement("span");
+  text.className = "marquee-text";
+  text.textContent = label;
+  track.append(text);
+  element.replaceChildren(track);
+  element.classList.add("marquee");
+  element.classList.remove("marquee-overflow");
+  marqueeRows.set(element, { label, track, text });
+  marqueeObserver?.observe(element);
+  if (element.isConnected) measureMarquee(element);
+}
+
+function disposeMarquees(container) {
+  for (const element of container.querySelectorAll(".marquee")) marqueeObserver?.unobserve(element);
 }
 
 function updateMediaMetadata() {
@@ -157,7 +210,7 @@ function queueTrackButton(track, action) {
     thumbnail.append(image);
   }
   const title = document.createElement("span");
-  title.textContent = trackTitle(track);
+  setMarquee(title, trackTitle(track));
   button.append(thumbnail, title);
   button.addEventListener("click", action);
   return button;
@@ -166,8 +219,8 @@ function queueTrackButton(track, action) {
 function renderQueue(anchor = false) {
   cancelQueueGesture();
   const scroll = queuePanel.scrollTop;
-  get("queue-now-title").textContent = trackTitle(current);
-  get("queue-now-artist").textContent = current?.metadata?.artist || "";
+  setMarquee(get("queue-now-title"), trackTitle(current));
+  setMarquee(get("queue-now-artist"), current?.metadata?.artist, true);
   const history = recordedCurrent ? queue.history.slice(0, -1) : queue.history;
   const historyRows = history.map((track) => {
     const row = document.createElement("li");
@@ -177,6 +230,7 @@ function renderQueue(anchor = false) {
     }));
     return row;
   });
+  disposeMarquees(get("history-list"));
   get("history-list").replaceChildren(...historyRows);
   get("history-empty").hidden = history.length > 0;
   const rows = queue.upcoming.map((track) => {
@@ -206,6 +260,7 @@ function renderQueue(anchor = false) {
     row.append(remove, content);
     return row;
   });
+  disposeMarquees(queueList);
   queueList.replaceChildren(...rows);
   get("queue-empty").hidden = Boolean(rows.length);
   if (anchor) {
@@ -313,17 +368,16 @@ function showQueue(visible) {
 function updateSelection() {
   const title = trackTitle(current);
   const artist = current?.metadata?.artist;
-  get("now-playing").textContent = title || "曲を選んでください";
-  setOptionalText("playing-artist", artist);
-  setOptionalText("playing-album", current?.metadata?.album);
-  get("mini-title").textContent = title;
-  get("mini-artist").textContent = artist || "再生画面を開く";
+  setMarquee(get("now-playing"), title || "曲を選んでください");
+  setMarquee(get("playing-artist"), artist);
+  setMarquee(get("playing-album"), current?.metadata?.album);
+  setMarquee(get("mini-title"), title);
+  setMarquee(get("mini-artist"), artist, true);
   get("previous").disabled = !current || !queue.previous.length;
   get("next").disabled = !current || !queue.upcoming.length;
   get("mini-next").disabled = get("next").disabled;
   toggle.disabled = !current;
   miniPlayer.hidden = !current;
-  get("player-actions").hidden = !current;
   queueToggle.hidden = !current;
   shuffleToggle.setAttribute("aria-pressed", String(queue.shuffled));
   if (player.dataset.queue === "true") {
@@ -333,8 +387,11 @@ function updateSelection() {
   document.body.dataset.hasTrack = String(Boolean(current));
   for (const row of list.children) {
     const button = row.querySelector(".track-select");
-    if (row.track === current) button.setAttribute("aria-current", "true");
+    const active = row.track === current;
+    if (active === button.hasAttribute("aria-current")) continue;
+    if (active) button.setAttribute("aria-current", "true");
     else button.removeAttribute("aria-current");
+    measureMarquee(row.querySelector(".track-name"));
   }
   updatePlayback();
   updateTime();
@@ -374,7 +431,7 @@ function setBackdrop(image) {
     setTimeout(() => {
       URL.revokeObjectURL(previous.src);
       previous.remove();
-    }, reducedMotion.matches ? 0 : 460);
+    }, reducedMotion.matches ? 0 : 500);
   }
   if (!image) {
     player.style.removeProperty("--player-tint");
@@ -426,6 +483,17 @@ function tintPlayer(image) {
   player.style.setProperty("--player-tint", "rgb(" + color.join(", ") + ")");
 }
 
+function makeBackdrop(image) {
+  // Store a tiny image so the moving player can be composited without a live blur.
+  const canvas = document.createElement("canvas");
+  canvas.width = 7;
+  canvas.height = 9;
+  const context = canvas.getContext("2d");
+  if (!context) return Promise.resolve(null);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+}
+
 function updateTrackMetadata(track, metadata) {
   track.metadata = { title: metadata.title, artist: metadata.artist, album: metadata.album };
   if (current === track) updateSelection();
@@ -450,13 +518,14 @@ async function showArtwork(track) {
     miniArtwork.hidden = false;
     queueArtwork.src = artworkUrl;
     queueArtwork.hidden = false;
-    setBackdrop(metadata.artwork);
     updateMediaMetadata();
     try {
       tintPlayer(artwork);
     } catch {
       // Artwork can still be shown when pixel access is restricted.
     }
+    const softImage = await makeBackdrop(artwork).catch(() => null);
+    if (request === artworkRequest) setBackdrop(softImage);
   } catch {
     if (request === artworkRequest) {
       clearArtwork();
@@ -467,8 +536,12 @@ async function showArtwork(track) {
 
 function selectTrack(track, followQueue = false) {
   if (!track) return;
+  const folder = track.folder ?? null;
+  if (!followQueue && (current !== track || playbackFolder !== folder)) {
+    playbackFolder = folder;
+    queue.start(folder?.tracks ?? rootTracks(), track);
+  }
   if (current !== track) {
-    if (!followQueue) queue.start(tracks, track);
     clearSource();
     current = track;
     recordedCurrent = false;
@@ -560,7 +633,26 @@ async function restoreTracks() {
   try {
     const connection = await trackStore.open();
     try {
-      const saved = await trackStore.run(connection, "readonly", (store) => store.getAll());
+      const [saved, layout] = await Promise.all([
+        trackStore.run(connection, "readonly", (store) => store.getAll()),
+        trackStore.run(connection, "readonly", (store) => store.get("library"), "settings"),
+      ]);
+      const savedById = new Map(saved.map((track) => [track.id, track]));
+      if (layout) {
+        const order = new Map(layout.order.map((id, index) => [id, index]));
+        saved.sort((first, second) => (order.get(first.id) ?? Infinity) - (order.get(second.id) ?? Infinity) || first.id - second.id);
+        customTrackOrder = order.size > 0;
+        for (const { name, ids } of layout.folders) {
+          const folder = { name, tracks: [] };
+          for (const id of ids) {
+            const track = savedById.get(id);
+            if (!track || track.folder) continue;
+            track.folder = folder;
+            folder.tracks.push(track);
+          }
+          folders.push(folder);
+        }
+      }
       tracks.unshift(...saved);
       database = connection;
       restoreHistory(saved);
@@ -576,6 +668,17 @@ async function restoreTracks() {
   }
 }
 
+function persistLibrary() {
+  if (!database) return;
+  const savedIds = (entries) => entries.flatMap((track) => track.id === undefined ? [] : [track.id]);
+  const layout = {
+    order: customTrackOrder ? savedIds(tracks) : [],
+    folders: folders.map((folder) => ({ name: folder.name, ids: savedIds(folder.tracks) })),
+  };
+  return trackStore.run(database, "readwrite", (store) => store.put(layout, "library"), "settings")
+    .catch(() => tellLibrary("フォルダや曲順の変更を端末に保存できませんでした。"));
+}
+
 function trackFeedback(track, message) {
   tellLibrary(message);
   if (document.body.dataset.view === "player" && track === current) tellPlayer(message);
@@ -588,6 +691,7 @@ async function saveTrack(track) {
   trackFeedback(track, "「" + trackTitle(track) + "」を端末に保存しています…");
   try {
     await persistTrack(track);
+    if (customTrackOrder || track.folder) persistLibrary();
     trackFeedback(track, "「" + trackTitle(track) + "」を端末に保存しました。");
   } catch (error) {
     trackFeedback(track, error?.name === "QuotaExceededError"
@@ -622,6 +726,7 @@ async function saveImportedTracks(added, invalid) {
     }
     // On quota failure, a smaller file in the same batch can still fit.
   }
+  if (saved && (customTrackOrder || folders.length)) persistLibrary();
   renderTracks();
   const failed = added.length - saved;
   const message = [
@@ -635,7 +740,7 @@ async function saveImportedTracks(added, invalid) {
 }
 
 async function deleteTrack(track) {
-  if (track.busy) return;
+  if (track.busy || !tracks.includes(track)) return;
   if (track.id !== undefined) {
     track.busy = "delete";
     renderTracks();
@@ -660,9 +765,27 @@ async function deleteTrack(track) {
     showView("library");
   }
   tracks.splice(index, 1);
+  if (track.folder) track.folder.tracks = track.folder.tracks.filter((entry) => entry !== track);
+  folderSelection?.chosen.delete(track);
+  if (customTrackOrder || folders.length) persistLibrary();
   if (track.thumbnail) URL.revokeObjectURL(track.thumbnail);
   renderTracks();
   tellLibrary("「" + trackTitle(track) + "」を音棚から削除しました。");
+}
+
+function confirmDeletion(track) {
+  if (track.busy || deleteDialog.open) return;
+  pendingDeletion = track;
+  deleteDialog.returnValue = "";
+  get("delete-song").textContent = "「" + trackTitle(track) + "」を音棚から削除します。";
+  deleteDialog.showModal();
+}
+
+function setDeleteMode(enabled) {
+  deleting = enabled;
+  list.toggleAttribute("data-deleting", enabled);
+  deleteMode.textContent = enabled ? "完了" : "編集";
+  cancelLibraryGesture();
 }
 
 function openTrackMenu(track) {
@@ -671,6 +794,8 @@ function openTrackMenu(track) {
   get("menu-title").textContent = trackTitle(track);
   const saved = track.id !== undefined;
   get("menu-status").textContent = saved ? "端末に保存済み" : "このセッションで再生できます";
+  get("menu-add").hidden = true;
+  get("menu-delete").hidden = false;
   get("menu-save").hidden = saved;
   get("menu-save").disabled = !database || Boolean(track.busy);
   get("menu-delete").disabled = Boolean(track.busy);
@@ -683,6 +808,7 @@ function closeTrackMenu(afterClose) {
     menu.close();
     menu.removeAttribute("data-closing");
     menuTrack = null;
+    menuFolder = null;
     afterClose?.();
   };
   if (reducedMotion.matches) finish();
@@ -727,6 +853,8 @@ function updateTrackRow(row) {
   artist.textContent = track.metadata?.artist || track.metadata?.album || "";
   artist.hidden = !artist.textContent;
   row.querySelector(".more").setAttribute("aria-label", title + "の操作");
+  row.querySelector(".track-delete").setAttribute("aria-label", title + "を削除");
+  row.querySelector(".library-handle").setAttribute("aria-label", title + "を並べ替え");
   const image = row.querySelector("img");
   if (track.thumbnail) image.src = track.thumbnail;
   image.hidden = !track.thumbnail;
@@ -752,27 +880,156 @@ function containsQuery(value, query) {
   return value.normalize("NFKC").toLocaleLowerCase("ja").includes(query);
 }
 
+function rootTracks() {
+  return tracks.filter((track) => !track.folder);
+}
+
+function visibleLibraryTracks() {
+  return activeFolder?.tracks ?? rootTracks();
+}
+
+function moveIntoFolder(entries, folder) {
+  for (const track of entries) {
+    if (track.folder) track.folder.tracks = track.folder.tracks.filter((entry) => entry !== track);
+    track.folder = folder;
+    if (folder) folder.tracks.push(track);
+  }
+  if (current) {
+    const inPlaybackScope = (track) => (track.folder ?? null) === playbackFolder;
+    queue.upcoming = queue.upcoming.filter(inPlaybackScope);
+    queue.previous = queue.previous.filter(inPlaybackScope);
+  }
+  return persistLibrary();
+}
+
+function showFolder(folder) {
+  activeFolder = folder;
+  if (deleting) setDeleteMode(false);
+  get("library-title").textContent = folder?.name ?? "ライブラリ";
+  get("folder-back").hidden = !folder;
+  get("library-title").tabIndex = -1;
+  get("library-title").focus({ preventScroll: true });
+  document.scrollingElement.scrollTop = 0;
+  search.value = "";
+  tellLibrary("");
+  filterLibrary();
+}
+
+function openFolderMenu(folder) {
+  if (menu.open) return;
+  menuFolder = folder;
+  get("menu-title").textContent = folder.name;
+  get("menu-status").textContent = folder.tracks.length + " 曲";
+  get("menu-add").hidden = false;
+  get("menu-save").hidden = true;
+  get("menu-delete").hidden = true;
+  menu.showModal();
+}
+
+function renderFolders(query) {
+  folderList.replaceChildren();
+  if (activeFolder || folderSelection) return;
+  for (const folder of folders) {
+    if (query && !containsQuery(folder.name, query)) continue;
+    const row = document.createElement("li");
+    row.className = "track folder-row";
+    row.folder = folder;
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "track-select";
+    open.innerHTML = '<span class="thumb folder-icon" aria-hidden="true"></span><span class="track-copy"><span class="track-name"></span><span class="track-artist"></span></span>';
+    open.querySelector(".track-name").textContent = folder.name;
+    open.querySelector(".track-artist").textContent = folder.tracks.length + " 曲";
+    open.addEventListener("click", () => showFolder(folder));
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "more";
+    more.textContent = "•••";
+    more.setAttribute("aria-label", folder.name + "の操作");
+    more.addEventListener("click", () => openFolderMenu(folder));
+    row.append(open, more);
+    folderList.append(row);
+  }
+}
+
+function setFolderSelection(folder, removing = false) {
+  folderSelection = folder ? { folder, removing, chosen: new Set() } : null;
+  get("selection-cancel").disabled = false;
+  selectionBar.hidden = !folder;
+  if (folder) {
+    setDeleteMode(false);
+    tellLibrary("");
+    get("selection-title").textContent = removing ? "フォルダから曲を除外" : "フォルダへ曲を追加";
+    list.dataset.selecting = removing ? "remove" : "add";
+    document.scrollingElement.scrollTop = 0;
+  } else {
+    delete list.dataset.selecting;
+  }
+  search.value = "";
+  filterLibrary();
+  if (folder) get("selection-cancel").focus({ preventScroll: true });
+  else (deleteMode.disabled ? get("library-title") : deleteMode).focus({ preventScroll: true });
+}
+
+function updateSelectionRow(row) {
+  const button = row.querySelector(".track-select");
+  if (folderSelection) button.setAttribute("aria-pressed", String(folderSelection.chosen.has(row.track)));
+}
+
 function renderTracks() {
+  cancelLibraryGesture();
   thumbnailObserver?.disconnect();
+  newFolder.disabled = !database;
+  newFolder.hidden = Boolean(activeFolder || folderSelection);
+  deleteMode.hidden = Boolean(folderSelection);
+  get("folder-back").hidden = !activeFolder || Boolean(folderSelection);
+  get("storage-summary").hidden = Boolean(activeFolder);
+  picker.closest(".import").hidden = Boolean(activeFolder || folderSelection);
   list.replaceChildren();
   const query = search.value.trim().normalize("NFKC").toLocaleLowerCase("ja");
-  const matches = tracks.filter((track) => !query || [track.title, track.metadata?.title, track.metadata?.artist]
+  renderFolders(query);
+  const libraryTracks = visibleLibraryTracks();
+  deleteMode.disabled = !libraryTracks.length;
+  selectionConfirm.disabled = !folderSelection?.chosen.size;
+  if (deleteMode.disabled && deleting) setDeleteMode(false);
+  const matches = libraryTracks.filter((track) => !query || [track.title, track.metadata?.title, track.metadata?.artist]
     .some((value) => value && containsQuery(value, query)));
   for (const track of matches) {
     const row = document.createElement("li");
-    row.className = "track";
+    row.className = "track queue-row";
     row.track = track;
     const select = document.createElement("button");
     select.type = "button";
     select.className = "track-select";
     select.innerHTML = '<span class="thumb" aria-hidden="true"><img alt="" hidden></span><span class="track-copy"><span class="track-name"></span><span class="track-artist" hidden></span></span>';
-    select.addEventListener("click", () => selectTrack(track));
+    select.addEventListener("click", () => {
+      if (folderSelection) {
+        if (folderSelection.saving) return;
+        const { chosen } = folderSelection;
+        if (!chosen.delete(track)) chosen.add(track);
+        selectionConfirm.disabled = !chosen.size;
+        updateSelectionRow(row);
+        return;
+      }
+      selectTrack(track);
+      showView("player");
+    });
 
     const more = document.createElement("button");
     more.type = "button";
     more.className = "more";
     more.textContent = "•••";
     more.addEventListener("click", () => openTrackMenu(track));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "track-delete";
+    remove.disabled = Boolean(track.busy);
+    remove.innerHTML = '<span aria-hidden="true"></span>';
+    remove.addEventListener("click", () => confirmDeletion(track));
+    const handle = document.createElement("button");
+    handle.type = "button";
+    handle.className = "queue-handle library-handle";
+    handle.innerHTML = '<span class="queue-symbol" aria-hidden="true"></span>';
     row.append(select);
     if (track.id !== undefined) {
       const saved = document.createElement("span");
@@ -783,25 +1040,26 @@ function renderTracks() {
       saved.title = "端末に保存済み";
       row.append(saved);
     }
-    row.append(more);
+    row.append(more, remove, handle);
+    updateSelectionRow(row);
     updateTrackRow(row);
     list.append(row);
     if (!track.preview && thumbnailObserver) thumbnailObserver.observe(row);
     else prepareTrackRow(row);
   }
-  get("empty-library").hidden = matches.length > 0;
+  get("empty-library").hidden = matches.length > 0 || folderList.childElementCount > 0;
   get("empty-title").textContent = searching ? "曲を検索しています…" : query ? "該当する曲がありません" : "曲がありません";
   get("empty-help").textContent = searching ? "" : query
     ? "別の曲名やアーティスト名で探してください。"
-    : "「MP3を追加」からiCloud Driveなどの曲を選べます。";
-  get("track-count").textContent = query ? matches.length + " / " + tracks.length + " 曲" : tracks.length + " 曲";
+    : activeFolder ? "ライブラリでフォルダの「•••」から曲を追加できます。" : "「MP3を追加」からiCloud Driveなどの曲を選べます。";
+  get("track-count").textContent = query ? matches.length + " / " + libraryTracks.length + " 曲" : libraryTracks.length + " 曲";
   updateStorageSummary();
   updateSelection();
 }
 
 async function filterLibrary() {
   const revision = ++searchRevision;
-  const unchecked = search.value.trim() ? tracks.filter((track) => !track.metadata) : [];
+  const unchecked = search.value.trim() ? visibleLibraryTracks().filter((track) => !track.metadata) : [];
   searching = unchecked.length > 0;
   renderTracks();
   for (const track of unchecked) {
@@ -832,7 +1090,7 @@ picker.addEventListener("change", () => {
   picker.value = "";
   if (added.length) {
     tracks.push(...added);
-    if (current) queue.append(added);
+    if (current && !playbackFolder) queue.append(added);
     search.value = "";
     filterLibrary();
     tellLibrary(added.length + "曲を端末に保存しています…");
@@ -843,6 +1101,105 @@ picker.addEventListener("change", () => {
 });
 
 search.addEventListener("input", filterLibrary);
+function folderAtPointer(event) {
+  if (!event || !deleting) return null;
+  const { clientX, clientY } = event;
+  if (clientY < search.closest(".library-search").getBoundingClientRect().bottom) return null;
+  return Array.from(folderList.children).find((row) => {
+    const { left, top, right, bottom } = row.getBoundingClientRect();
+    return clientX >= left && clientX <= right && clientY >= top && clientY <= bottom;
+  });
+}
+
+const cancelLibraryGesture = bindQueueGestures(list, document.scrollingElement, {
+  scrollDrag({ clientY }) {
+    const topEdge = search.closest(".library-search").getBoundingClientRect().bottom + 24;
+    const bottom = mobile.matches && !miniPlayer.hidden ? miniPlayer.getBoundingClientRect().top : window.innerHeight;
+    const bottomEdge = bottom - 34;
+    if (clientY < topEdge) return -Math.min(14, Math.ceil((topEdge - clientY) / 3));
+    if (clientY > bottomEdge) return Math.min(14, Math.ceil((clientY - bottomEdge) / 3));
+    return 0;
+  },
+  previewDrop(event) {
+    const destination = folderAtPointer(event);
+    for (const row of folderList.children) row.toggleAttribute("data-drop-target", row === destination);
+  },
+  drop(track, event) {
+    if (track.folder) return true;
+    const destination = folderAtPointer(event);
+    if (!destination) return false;
+    Promise.resolve(moveIntoFolder([track], destination.folder)).then(renderTracks);
+    return true;
+  },
+  reorder(track, target) {
+    const neighbor = list.children[target];
+    if (!deleting || activeFolder || !neighbor || neighbor.track === track) return;
+    const row = Array.from(list.children).find((entry) => entry.track === track);
+    const from = tracks.indexOf(track);
+    const to = tracks.indexOf(neighbor.track);
+    tracks.splice(from, 1);
+    tracks.splice(to, 0, track);
+    if (from < to) neighbor.after(row);
+    else neighbor.before(row);
+    customTrackOrder = true;
+    persistLibrary();
+    if (current && !playbackFolder && !current.folder && !queue.shuffled) {
+      queue.start(rootTracks(), current);
+      updateSelection();
+    }
+  },
+}, reducedMotion);
+deleteMode.addEventListener("click", () => {
+  if (activeFolder) setFolderSelection(activeFolder, true);
+  else setDeleteMode(!deleting);
+});
+get("folder-back").addEventListener("click", () => showFolder(null));
+const folderName = get("folder-name");
+newFolder.addEventListener("click", () => {
+  folderName.value = "";
+  folderName.setCustomValidity("");
+  createFolderDialog.showModal();
+});
+folderName.addEventListener("input", () => folderName.setCustomValidity(""));
+createFolderDialog.querySelector("form").addEventListener("submit", (event) => {
+  if (event.submitter?.value === "cancel") return;
+  event.preventDefault();
+  const name = folderName.value.trim();
+  if (!name) {
+    folderName.setCustomValidity("フォルダ名を入力してください。");
+    folderName.reportValidity();
+    return;
+  }
+  folders.push({ name, tracks: [] });
+  persistLibrary();
+  createFolderDialog.close();
+  search.value = "";
+  filterLibrary();
+});
+get("selection-cancel").addEventListener("click", () => setFolderSelection(null));
+selectionConfirm.addEventListener("click", async () => {
+  if (!folderSelection) return;
+  const selection = folderSelection;
+  const { chosen, folder, removing } = selection;
+  const entries = visibleLibraryTracks().filter((track) => chosen.has(track));
+  selection.saving = true;
+  selectionConfirm.disabled = true;
+  get("selection-cancel").disabled = true;
+  await moveIntoFolder(entries, removing ? null : folder);
+  if (folderSelection === selection) setFolderSelection(null);
+  else renderTracks();
+});
+deleteDialog.addEventListener("close", () => {
+  const track = pendingDeletion;
+  pendingDeletion = null;
+  if (track && deleteDialog.returnValue === "delete") {
+    deleteTrack(track).then(() => {
+      if (!document.activeElement || document.activeElement === document.body) {
+        (deleteMode.disabled ? picker : deleteMode).focus({ preventScroll: true });
+      }
+    });
+  }
+});
 get("library-tab").addEventListener("click", () => showView("library"));
 get("player-tab").addEventListener("click", () => showView("player"));
 mobile.addEventListener("change", syncLayout);
@@ -852,34 +1209,147 @@ queueCurrent.addEventListener("click", () => {
   queueToggle.focus({ preventScroll: true });
 });
 shuffleToggle.addEventListener("click", () => {
-  queue.toggleShuffle(tracks);
+  queue.toggleShuffle(playbackFolder?.tracks ?? rootTracks());
   updateSelection();
 });
 const playerHeader = get("player-header");
 let playerDrag = null;
+let playerDragFrame = 0;
+let clearPlayerMorph = null;
+
+function startPlayerMorph(height) {
+  if (reducedMotion.matches || miniPlayer.hidden) return null;
+  const source = player.dataset.queue === "true" ? queueCurrent.querySelector(".thumb") : get("artwork-stage").querySelector(".cover");
+  const target = miniPlayer.querySelector(".thumb");
+  const from = source.getBoundingClientRect();
+  const to = target.getBoundingClientRect();
+  const card = miniPlayer.getBoundingClientRect();
+  if (!from.width || !to.width) return null;
+  const jacket = source.cloneNode(true);
+  jacket.querySelector("img")?.removeAttribute("id");
+  jacket.classList.add("moving-jacket");
+  jacket.setAttribute("aria-hidden", "true");
+  jacket.style.width = from.width + "px";
+  jacket.style.height = from.height + "px";
+  jacket.style.transform = `translate3d(${from.left}px, ${from.top}px, 0) scale(1)`;
+  jacket.style.borderRadius = getComputedStyle(source).borderRadius;
+  source.setAttribute("data-moving", "");
+  document.body.append(jacket);
+  const corner = player.style.getPropertyValue("--player-corner");
+  player.style.setProperty("--morph-radius", `${corner} ${corner} 0px 0px`);
+  document.body.setAttribute("data-player-morph", "");
+  player.setAttribute("data-morph", "");
+  jacket.getBoundingClientRect();
+  return {
+    source, jacket, from, to, card, height, width: player.getBoundingClientRect().width,
+    toRadius: parseFloat(getComputedStyle(target).borderTopLeftRadius),
+  };
+}
+
+function collapsePlayer(morph) {
+  const { jacket, from, to, card, width, height, toRadius } = morph;
+  const scale = to.width / from.width;
+  const radius = getComputedStyle(miniPlayer).borderRadius;
+  const duration = parseFloat(getComputedStyle(player).getPropertyValue("--player-collapse-time"));
+  jacket.style.transform = `translate3d(${to.left}px, ${to.top}px, 0) scale(${scale})`;
+  jacket.style.borderRadius = toRadius / scale + "px";
+  player.style.setProperty("--player-drag", card.top + "px");
+  player.style.setProperty("--morph-left", card.left + "px");
+  player.style.setProperty("--morph-right", (width - card.right) + "px");
+  player.style.setProperty("--morph-bottom", (height - card.height) + "px");
+  player.style.setProperty("--morph-radius", radius);
+  player.style.setProperty("--morph-opacity", "1");
+  const timer = setTimeout(() => endPlayerMorph(morph), duration + 20);
+  clearPlayerMorph = () => {
+    clearTimeout(timer);
+    endPlayerMorph(morph);
+  };
+}
+
+function endPlayerMorph(morph) {
+  morph.jacket.remove();
+  morph.source.removeAttribute("data-moving");
+  document.body.removeAttribute("data-player-morph");
+  player.removeAttribute("data-morph");
+  for (const property of ["--player-drag", "--morph-left", "--morph-right", "--morph-bottom", "--morph-radius", "--morph-opacity"]) {
+    player.style.removeProperty(property);
+  }
+  clearPlayerMorph = null;
+}
+
+function paintPlayerDrag() {
+  playerDragFrame = 0;
+  if (!playerDrag || reducedMotion.matches) return;
+  const { distance, height } = playerDrag;
+  player.style.setProperty("--player-drag", distance + "px");
+  player.style.setProperty("--player-corner", Math.min(32, distance * .48) + "px");
+  document.body.style.setProperty("--library-shade", String(.38 * (1 - distance / height)));
+}
+
 playerHeader.addEventListener("pointerdown", (event) => {
-  if (!mobile.matches || event.button !== 0 ||
-      event.target.closest("button") || playerDrag) return;
-  playerDrag = { id: event.pointerId, start: event.clientY };
+  if (!mobile.matches || event.button !== 0 || event.target.closest("button") || playerDrag ||
+      player.getBoundingClientRect().top > 2) return;
+  clearPlayerMorph?.();
+  playerDrag = { id: event.pointerId, start: event.clientY, height: player.clientHeight, distance: 0 };
   playerHeader.setPointerCapture(event.pointerId);
   player.setAttribute("data-dragging", "");
+  document.body.setAttribute("data-player-dragging", "");
+  paintPlayerDrag();
 });
 playerHeader.addEventListener("pointermove", (event) => {
-  if (event.pointerId !== playerDrag?.id || reducedMotion.matches) return;
-  player.style.setProperty("--player-drag", Math.max(0, event.clientY - playerDrag.start) + "px");
+  if (event.pointerId !== playerDrag?.id) return;
+  playerDrag.distance = Math.min(playerDrag.height, Math.max(0, event.clientY - playerDrag.start));
+  if (!playerDragFrame) playerDragFrame = requestAnimationFrame(paintPlayerDrag);
 });
 function finishPlayerDrag(event) {
+  if (event.type === "lostpointercapture" && event.target !== playerHeader) return;
   if (event.pointerId !== playerDrag?.id) return;
-  const dismiss = event.type === "pointerup" && event.clientY - playerDrag.start >= 66;
+  const released = event.type === "pointerup";
+  if (released) playerDrag.distance = Math.min(playerDrag.height, Math.max(0, event.clientY - playerDrag.start));
+  const dismiss = released && playerDrag.distance >= playerDrag.height * .4;
+  cancelAnimationFrame(playerDragFrame);
+  paintPlayerDrag();
+  const morph = dismiss ? startPlayerMorph(playerDrag.height) : null;
+  player.getBoundingClientRect();
   playerDrag = null;
   player.removeAttribute("data-dragging");
-  player.style.removeProperty("--player-drag");
+  player.style.removeProperty("--player-corner");
+  document.body.removeAttribute("data-player-dragging");
+  document.body.style.removeProperty("--library-shade");
+  if (morph) collapsePlayer(morph);
+  else player.style.removeProperty("--player-drag");
   if (dismiss) showView("library");
 }
 for (const event of ["pointerup", "pointercancel", "lostpointercapture"]) {
   playerHeader.addEventListener(event, finishPlayerDrag);
 }
-get("player-actions").addEventListener("click", () => openTrackMenu(current));
+
+// Older WebKit versions can still zoom on a second tap on the empty panel.
+let playerTouch = null;
+let previousPlayerTap = null;
+player.addEventListener("touchstart", (event) => {
+  playerTouch = event.touches.length === 1 && !event.target.closest("button, input") ? event.touches[0] : null;
+}, { passive: true });
+player.addEventListener("touchend", (event) => {
+  const end = event.changedTouches[0];
+  const start = playerTouch;
+  playerTouch = null;
+  if (!start || !end || event.touches.length ||
+      Math.hypot(end.clientX - start.clientX, end.clientY - start.clientY) > 12) {
+    previousPlayerTap = null;
+    return;
+  }
+  const time = performance.now();
+  const tap = previousPlayerTap;
+  if (tap && time - tap.time < 350 && Math.hypot(end.clientX - tap.x, end.clientY - tap.y) < 30) {
+    if (event.cancelable) event.preventDefault();
+    previousPlayerTap = null;
+  } else previousPlayerTap = { time, x: end.clientX, y: end.clientY };
+}, { passive: false });
+player.addEventListener("touchcancel", () => {
+  playerTouch = null;
+  previousPlayerTap = null;
+}, { passive: true });
 get("menu-close").addEventListener("click", () => closeTrackMenu());
 menu.addEventListener("cancel", (event) => {
   event.preventDefault();
@@ -895,9 +1365,13 @@ get("menu-save").addEventListener("click", () => {
   const track = menuTrack;
   if (track) closeTrackMenu(() => saveTrack(track));
 });
+get("menu-add").addEventListener("click", () => {
+  const folder = menuFolder;
+  if (folder) closeTrackMenu(() => setFolderSelection(folder));
+});
 get("menu-delete").addEventListener("click", () => {
   const track = menuTrack;
-  if (track) closeTrackMenu(() => deleteTrack(track));
+  if (track) closeTrackMenu(() => confirmDeletion(track));
 });
 get("previous").addEventListener("click", () => move(-1));
 get("next").addEventListener("click", () => move(1));

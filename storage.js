@@ -3,9 +3,10 @@
 const trackStore = {
   async open() {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open("otodana-library", 1);
-      request.onupgradeneeded = () => {
-        request.result.createObjectStore("tracks", { keyPath: "id", autoIncrement: true });
+      const request = indexedDB.open("otodana-library", 2);
+      request.onupgradeneeded = ({ oldVersion }) => {
+        if (oldVersion === 0) request.result.createObjectStore("tracks", { keyPath: "id", autoIncrement: true });
+        request.result.createObjectStore("settings");
       };
       request.onsuccess = () => {
         const database = request.result;
@@ -16,10 +17,10 @@ const trackStore = {
     });
   },
 
-  run(database, mode, operation) {
+  run(database, mode, operation, store = "tracks") {
     return new Promise((resolve, reject) => {
-      const transaction = database.transaction("tracks", mode);
-      const request = operation(transaction.objectStore("tracks"));
+      const transaction = database.transaction(store, mode);
+      const request = operation(transaction.objectStore(store));
       transaction.oncomplete = () => resolve(request.result);
       transaction.onabort = () => reject(transaction.error ?? request.error);
     });

@@ -82,9 +82,11 @@ class PlaybackQueue {
 }
 
 function bindQueueGestures(list, scrollArea, actions, reducedMotion) {
+  const canSwipe = Boolean(actions.remove);
   let drag = null;
   let revealed = null;
   let suppressClick = false;
+  let scrollFrame = 0;
 
   function reveal(row) {
     if (revealed && revealed !== row) {
@@ -100,12 +102,39 @@ function bindQueueGestures(list, scrollArea, actions, reducedMotion) {
 
   function clearGesture() {
     if (!drag) return;
+    cancelAnimationFrame(scrollFrame);
+    scrollFrame = 0;
     for (const row of drag.rows) {
       delete row.dataset.gesture;
       row.style.removeProperty("--queue-shift");
     }
-    if (drag.row !== revealed) drag.row.querySelector(".queue-remove").hidden = true;
+    if (canSwipe && drag.row !== revealed) drag.row.querySelector(".queue-remove").hidden = true;
+    actions.previewDrop?.(null);
     drag = null;
+  }
+
+  function paintReorder(event) {
+    const { row } = drag;
+    const offset = event.clientY - drag.y + scrollArea.scrollTop - drag.scroll;
+    actions.previewDrop?.(event);
+    drag.target = Math.max(0, Math.min(drag.rows.length - 1, drag.index + Math.round(offset / drag.height)));
+    row.style.setProperty("--queue-shift", offset + "px");
+    for (const [index, neighbor] of drag.rows.entries()) {
+      if (neighbor === row) continue;
+      const shift = index > drag.index && index <= drag.target ? -drag.height :
+        index < drag.index && index >= drag.target ? drag.height : 0;
+      neighbor.style.setProperty("--queue-shift", shift + "px");
+    }
+  }
+
+  function scrollWhileDragging() {
+    scrollFrame = 0;
+    if (drag?.mode !== "reorder") return;
+    const before = scrollArea.scrollTop;
+    scrollArea.scrollTop += actions.scrollDrag(drag.pointer);
+    if (scrollArea.scrollTop === before) return;
+    paintReorder(drag.pointer);
+    scrollFrame = requestAnimationFrame(scrollWhileDragging);
   }
 
   function positions() {
@@ -129,6 +158,7 @@ function bindQueueGestures(list, scrollArea, actions, reducedMotion) {
     const row = event.target.closest(".queue-row");
     if (!row || event.target.closest(".queue-remove")) return;
     const handle = Boolean(event.target.closest(".queue-handle"));
+    if (!canSwipe && !handle) return;
     if (revealed && revealed !== row) reveal(null);
     const rows = Array.from(list.children);
     const index = rows.indexOf(row);
@@ -150,9 +180,9 @@ function bindQueueGestures(list, scrollArea, actions, reducedMotion) {
         return;
       }
       list.setPointerCapture(event.pointerId);
-      drag.mode = drag.handle && Math.abs(y) >= Math.abs(x) ? "reorder" : "swipe";
+      drag.mode = !canSwipe || (drag.handle && Math.abs(y) >= Math.abs(x)) ? "reorder" : "swipe";
     }
-    if (drag.mode === "reorder" && x < -60) {
+    if (canSwipe && drag.mode === "reorder" && x < -60) {
       for (const row of drag.rows) row.style.removeProperty("--queue-shift");
       drag.mode = "swipe";
     }
@@ -165,14 +195,10 @@ function bindQueueGestures(list, scrollArea, actions, reducedMotion) {
       row.style.setProperty("--queue-shift", drag.distance + "px");
       return;
     }
-    const offset = y + scrollArea.scrollTop - drag.scroll;
-    drag.target = Math.max(0, Math.min(drag.rows.length - 1, drag.index + Math.round(offset / drag.height)));
-    row.style.setProperty("--queue-shift", offset + "px");
-    for (const [index, neighbor] of drag.rows.entries()) {
-      if (neighbor === row) continue;
-      const shift = index > drag.index && index <= drag.target ? -drag.height :
-        index < drag.index && index >= drag.target ? drag.height : 0;
-      neighbor.style.setProperty("--queue-shift", shift + "px");
+    paintReorder(event);
+    if (actions.scrollDrag) {
+      drag.pointer = event;
+      if (!scrollFrame) scrollFrame = requestAnimationFrame(scrollWhileDragging);
     }
   });
 
@@ -189,7 +215,9 @@ function bindQueueGestures(list, scrollArea, actions, reducedMotion) {
     clearGesture();
     if (!finished) return;
     suppressClick = true;
-    if (mode === "reorder") actions.reorder(row.track, target);
+    if (mode === "reorder") {
+      if (!actions.drop?.(row.track, event)) actions.reorder(row.track, target);
+    }
     else if (distance <= -112) actions.remove(row.track);
     animateFrom(before);
   }
@@ -207,11 +235,12 @@ function bindQueueGestures(list, scrollArea, actions, reducedMotion) {
     if (!event.target.closest(".queue-handle")) return;
     const row = event.target.closest(".queue-row");
     const index = Array.from(list.children).indexOf(row);
-    if (!["ArrowUp", "ArrowDown", "Delete", "Backspace"].includes(event.key)) return;
+    const removes = canSwipe && ["Delete", "Backspace"].includes(event.key);
+    if (!removes && !["ArrowUp", "ArrowDown"].includes(event.key)) return;
     event.preventDefault();
     const before = positions();
     const target = index + (event.key === "ArrowUp" ? -1 : 1);
-    if (event.key === "Delete" || event.key === "Backspace") {
+    if (removes) {
       actions.remove(row.track);
       list.children[Math.min(index, list.children.length - 1)]?.querySelector(".queue-handle").focus();
     } else if (target >= 0 && target < list.children.length) {

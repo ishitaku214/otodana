@@ -9,33 +9,48 @@
   <link rel="icon" href="icon-192.png">
   <link rel="apple-touch-icon" href="icon-192.png">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="style.css?v=6">
-  <script src="storage.js" defer></script>
+  <link rel="stylesheet" href="style.css?v=11">
+  <script src="storage.js?v=10" defer></script>
   <script src="artwork.js?v=3" defer></script>
-  <script src="queue.js" defer></script>
-  <script src="app.js?v=6" defer></script>
+  <script src="queue.js?v=11" defer></script>
+  <script src="app.js?v=11" defer></script>
 </head>
 <body data-view="library">
   <main class="layout">
     <section id="library" aria-labelledby="library-title">
       <div class="library-heading">
+        <button type="button" id="folder-back" hidden>‹ ライブラリ</button>
         <div class="library-header">
-          <h1 id="library-title">ライブラリ</h1>
-          <label class="import">
-            <span class="plus" aria-hidden="true"></span> MP3を追加
-            <input id="file-picker" type="file" accept=".mp3,audio/mpeg" multiple aria-label="MP3を追加">
-          </label>
+          <h1 id="library-title" tabindex="-1">ライブラリ</h1>
+          <div class="library-actions">
+            <label class="import">
+              <span class="plus" aria-hidden="true"></span> MP3を追加
+              <input id="file-picker" type="file" accept=".mp3,audio/mpeg" multiple aria-label="MP3を追加">
+            </label>
+            <button type="button" id="delete-mode" disabled>編集</button>
+          </div>
         </div>
         <div class="library-summary">
           <span id="track-count">0 曲</span>
           <span id="storage-summary">保存した曲を確認しています…</span>
+          <button type="button" id="new-folder" aria-label="フォルダを作成" disabled><span class="plus" aria-hidden="true"></span></button>
         </div>
       </div>
-      <label class="search">
-        <span class="search-symbol" aria-hidden="true"></span>
-        <input id="search" type="search" placeholder="曲名・アーティストで検索" aria-label="曲名・アーティストで検索" autocomplete="off">
-      </label>
+      <div class="library-search">
+        <div id="folder-selection" hidden>
+          <h2 id="selection-title"></h2>
+          <div class="dialog-actions">
+            <button type="button" id="selection-cancel">キャンセル</button>
+            <button type="button" id="selection-confirm" value="confirm" disabled>確定</button>
+          </div>
+        </div>
+        <label class="search">
+          <span class="search-symbol" aria-hidden="true"></span>
+          <input id="search" type="search" placeholder="曲名・アーティストで検索" aria-label="曲名・アーティストで検索" autocomplete="off">
+        </label>
+      </div>
       <p id="library-message" class="feedback" role="status"></p>
+      <ul id="folders" class="tracks" aria-label="フォルダ"></ul>
       <div id="empty-library" class="empty">
         <span class="empty-art thumb" aria-hidden="true"></span>
         <h2 id="empty-title">曲がありません</h2>
@@ -53,14 +68,16 @@
       <div class="player-content">
         <div class="player-stage">
           <div id="artwork-stage">
-            <div class="cover" aria-hidden="true">
-              <div class="cover-pattern"><span>♫</span></div>
-              <img id="artwork" alt="" hidden>
+            <div class="cover-space">
+              <div class="cover" aria-hidden="true">
+                <div class="cover-pattern"><span>♫</span></div>
+                <img id="artwork" alt="" hidden>
+              </div>
             </div>
             <div class="playing-details">
               <p id="now-playing" class="song-title" aria-live="polite">曲を選んでください</p>
-              <p id="playing-artist" class="artist" hidden></p>
-              <p id="playing-album" class="album" hidden></p>
+              <p id="playing-artist" class="artist"></p>
+              <p id="playing-album" class="album"></p>
             </div>
           </div>
           <section class="queue-panel" id="queue-panel" aria-labelledby="queue-title" inert>
@@ -99,7 +116,6 @@
           <div class="player-tools">
             <button type="button" id="shuffle-toggle" class="player-actions shuffle" aria-label="シャッフル" aria-pressed="false"><span aria-hidden="true">⤨</span></button>
             <button type="button" id="queue-toggle" class="player-actions" aria-label="次に再生する曲を表示" aria-controls="queue-panel" aria-pressed="false" hidden><span class="queue-symbol" aria-hidden="true"></span></button>
-            <button type="button" id="player-actions" class="player-actions" aria-label="再生中の曲の操作" hidden>•••</button>
           </div>
         </div>
         <p id="player-message" class="feedback player-feedback" role="status"></p>
@@ -109,7 +125,7 @@
   </main>
 
   <aside id="mini-player" class="mini-player" aria-label="ミニプレイヤー" hidden>
-    <button type="button" id="player-tab" class="mini-open" aria-label="再生画面を開く">
+    <button type="button" id="player-tab" class="mini-open" aria-label="全画面プレイヤー">
       <span class="thumb" aria-hidden="true"><img id="mini-artwork" alt="" hidden></span>
       <span class="mini-text"><span id="mini-title"></span><span id="mini-artist"></span></span>
     </button>
@@ -123,8 +139,28 @@
   <dialog id="track-menu" aria-labelledby="menu-title">
     <div class="menu-heading"><h2 id="menu-title"></h2><button type="button" id="menu-close" aria-label="閉じる">×</button></div>
     <p id="menu-status"></p>
+    <button type="button" id="menu-add" class="save" hidden><span aria-hidden="true">＋</span> フォルダへ曲を追加</button>
     <button type="button" id="menu-save" class="save"><span aria-hidden="true">↓</span> 端末に保存</button>
     <button type="button" id="menu-delete" class="delete"><span aria-hidden="true">−</span> 音棚から削除</button>
+  </dialog>
+  <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-song">
+    <h2 id="delete-title">削除しますか？</h2>
+    <p id="delete-song"></p>
+    <form method="dialog">
+      <button value="cancel" autofocus>キャンセル</button>
+      <button value="delete">削除</button>
+    </form>
+  </dialog>
+  <dialog id="folder-create" class="folder-dialog" aria-labelledby="folder-create-title">
+    <h2 id="folder-create-title">フォルダを作成</h2>
+    <form method="dialog">
+      <label for="folder-name">フォルダ名</label>
+      <input id="folder-name" required maxlength="80" autofocus>
+      <div class="dialog-actions">
+        <button value="cancel" formnovalidate>キャンセル</button>
+        <button value="confirm">作成</button>
+      </div>
+    </form>
   </dialog>
 </body>
 </html>
