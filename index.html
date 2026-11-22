@@ -9,12 +9,12 @@
   <link rel="icon" href="icon-192.png">
   <link rel="apple-touch-icon" href="icon-192.png">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="style.css?v=23">
-  <script src="storage.js?v=12" defer></script>
+  <link rel="stylesheet" href="style.css?v=25">
+  <script src="storage.js?v=25" defer></script>
   <script src="artwork.js?v=4" defer></script>
-  <script src="queue.js?v=22" defer></script>
-  <script src="download.js?v=23" defer></script>
-  <script src="app.js?v=23" defer></script>
+  <script src="queue.js?v=24" defer></script>
+  <script src="download.js?v=25" defer></script>
+  <script src="app.js?v=25" defer></script>
 </head>
 <body data-view="library">
   <main class="layout">
@@ -22,15 +22,9 @@
       <div class="library-heading">
         <button type="button" id="folder-back" hidden>‹ ライブラリ</button>
         <h1 id="library-title" tabindex="-1">ライブラリ</h1>
-        <button type="button" id="folder-exclude" hidden>フォルダから曲を除外</button>
         <div class="library-summary">
           <span id="track-count">0 曲</span>
           <span id="storage-summary">保存した曲を確認しています…</span>
-          <button type="button" id="new-folder" class="library-icon" aria-label="フォルダを作成" disabled>
-            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <path fill-rule="evenodd" d="M4 5h5.4c.6 0 1.2.2 1.6.6L12.5 7H20a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Zm8 4.5a.9.9 0 0 0-.9.9v2.2H9a.9.9 0 0 0 0 1.8h2.1v2.2a.9.9 0 0 0 1.8 0v-2.2H15a.9.9 0 0 0 0-1.8h-2.1v-2.2a.9.9 0 0 0-.9-.9Z"/>
-            </svg>
-          </button>
         </div>
       </div>
       <div class="library-search">
@@ -41,26 +35,38 @@
             <button type="button" id="selection-confirm" value="confirm" disabled>確定</button>
           </div>
         </div>
+        <div class="library-settings">
+          <button type="button" id="library-settings" class="library-icon" aria-label="ライブラリの設定" aria-haspopup="dialog" aria-controls="track-menu">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m10 3-.5 2.2-1.6.9-2.2-.7-2 3.4 1.7 1.6v1.8l-1.7 1.6 2 3.5 2.2-.7 1.6.9.5 2.3h4l.5-2.3 1.6-.9 2.2.7 2-3.5-1.7-1.6v-1.8l1.7-1.6-2-3.4-2.2.7-1.6-.9L14 3Z"/><circle cx="12" cy="11.4" r="3.1"/>
+            </svg>
+          </button>
+        </div>
         <label class="search">
           <span class="search-symbol" aria-hidden="true"></span>
           <input id="search" type="search" placeholder="曲名・アーティストで検索" aria-label="曲名・アーティストで検索" autocomplete="off">
         </label>
-      </div>
-      <div class="library-actions">
-        <button type="button" id="add-tracks" class="library-icon" aria-label="曲を追加" aria-haspopup="dialog" aria-controls="add-dialog">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M13 3v12.2a4.4 4.4 0 0 0-2-.45c-2.65 0-4.8 1.6-4.8 3.58 0 1.66 1.44 2.67 3.37 2.67 2.6 0 4.93-1.54 4.93-4.12V7.3c.76 1.06 1.91 1.94 3.64 2.71v-2.2C16.02 6.71 14.9 5.08 14.5 3Z"/>
-          </svg>
-        </button>
-        <button type="button" id="delete-mode" class="library-icon" aria-label="曲を編集" aria-pressed="false" disabled>
-          <svg class="edit-pencil" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m6.1 15.4-2.7 5.2 5.3-2.5L20 6.8l-2.7-2.7L6.1 15.4Z" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linejoin="round"/>
-            <path d="m4 20 1.9-3.6 1.7 1.7L4 20Zm13.2-16 1.2-1.2a1.95 1.95 0 0 1 2.75 2.75L20 6.8 17.2 4Z" fill="currentColor"/>
-          </svg>
-          <svg class="edit-done" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m5 12 4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
+        <div class="library-actions">
+          <button type="button" id="add-tracks" class="library-icon" aria-label="曲を追加" aria-haspopup="dialog" aria-controls="add-dialog">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M13 3v12.2a4.4 4.4 0 0 0-2-.45c-2.65 0-4.8 1.6-4.8 3.58 0 1.66 1.44 2.67 3.37 2.67 2.6 0 4.93-1.54 4.93-4.12V7.3c.76 1.06 1.91 1.94 3.64 2.71v-2.2C16.02 6.71 14.9 5.08 14.5 3Z"/>
+            </svg>
+          </button>
+          <button type="button" id="new-folder" class="library-icon" aria-label="フォルダを作成" disabled>
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" d="M4 5h5.4c.6 0 1.2.2 1.6.6L12.5 7H20a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Zm8 4.5a.9.9 0 0 0-.9.9v2.2H9a.9.9 0 0 0 0 1.8h2.1v2.2a.9.9 0 0 0 1.8 0v-2.2H15a.9.9 0 0 0 0-1.8h-2.1v-2.2a.9.9 0 0 0-.9-.9Z"/>
+            </svg>
+          </button>
+          <button type="button" id="delete-mode" class="library-icon" aria-label="曲を編集" aria-pressed="false" disabled>
+            <svg class="edit-pencil" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m6.1 15.4-2.7 5.2 5.3-2.5L20 6.8l-2.7-2.7L6.1 15.4Z" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linejoin="round"/>
+              <path d="m4 20 1.9-3.6 1.7 1.7L4 20Zm13.2-16 1.2-1.2a1.95 1.95 0 0 1 2.75 2.75L20 6.8 17.2 4Z" fill="currentColor"/>
+            </svg>
+            <svg class="edit-done" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m5 12 4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
       </div>
       <p id="library-message" class="feedback" role="status"></p>
       <ul id="folders" class="tracks" aria-label="フォルダ"></ul>
@@ -94,8 +100,11 @@
             </div>
           </div>
           <section class="queue-panel" id="queue-panel" aria-labelledby="queue-title" inert>
-            <div class="queue-history-marker"><h3 id="history-title">履歴</h3></div>
             <section class="queue-history" aria-labelledby="history-title">
+              <div id="history-heading" class="queue-history-heading">
+                <h3 id="history-title">履歴</h3>
+                <button type="button" id="history-clear" aria-label="再生履歴を削除" disabled>削除</button>
+              </div>
               <ol id="history-list" class="queue-list"></ol>
               <p id="history-empty">再生履歴はまだありません。</p>
             </section>
@@ -111,6 +120,7 @@
           </section>
           <div id="video-stage" hidden>
             <video id="player-video" playsinline preload="metadata" aria-label="動画"></video>
+            <img id="video-poster" alt="" hidden>
             <div class="video-touch-zone" data-seconds="-10" aria-hidden="true"></div>
             <div class="video-touch-zone" data-seconds="10" aria-hidden="true"></div>
             <div id="video-skip" role="status"></div>
@@ -144,7 +154,7 @@
 
   <aside id="mini-player" class="mini-player" aria-label="ミニプレイヤー" hidden>
     <button type="button" id="player-tab" class="mini-open" aria-label="全画面プレイヤー">
-      <span class="thumb" aria-hidden="true"><img id="mini-artwork" alt="" hidden><canvas id="mini-video" class="thumb-video" width="128" height="128" hidden></canvas></span>
+      <span class="thumb" aria-hidden="true"><img id="mini-artwork" alt="" hidden></span>
       <span class="mini-text"><span id="mini-title"></span><span id="mini-artist"></span></span>
     </button>
     <button type="button" id="mini-toggle" aria-label="再生"><span class="glyph play-glyph" aria-hidden="true"></span></button>
@@ -163,7 +173,7 @@
       <label class="import">端末のファイルを選ぶ
         <input id="file-picker" type="file" accept=".mp3,.mp4,.m4v,.mov,.webm,audio/mpeg,video/mp4,video/quicktime,video/webm" multiple aria-label="端末のファイルを選ぶ" autofocus>
       </label>
-      <button type="button" id="download-open" class="import">動画リンク</button>
+      <button type="button" id="download-open" class="import">動画をダウンロード</button>
     </div>
   </dialog>
 
@@ -180,14 +190,7 @@
     </a>
     <label for="download-url">動画の共有リンク</label>
     <input id="download-url" type="url" inputmode="url" placeholder="https://" autocapitalize="off" autocomplete="off" spellcheck="false">
-    <div class="download-file-row">
-      <label class="import">端末のファイルを選ぶ
-        <input id="download-file" type="file" accept="audio/*,video/*,.mp3,.mp4,.m4a,.m4v,.mov,.webm,.mkv,.wav,.ogg,.flac" aria-label="端末のファイルを選ぶ">
-      </label>
-      <p id="download-file-name" class="feedback"></p>
-    </div>
-    <button type="button" id="download-formats" aria-controls="download-options" aria-expanded="false"><span aria-hidden="true">↓</span> 保存形式を選ぶ</button>
-    <div id="download-options" class="dialog-actions" hidden>
+    <div id="download-options" class="dialog-actions">
       <button type="button" value="mp4">MP4で保存</button>
       <button type="button" value="mp3">MP3で保存</button>
     </div>
@@ -210,8 +213,16 @@
         <label for="download-server">取得サーバーのURL</label>
         <input id="download-server" type="url" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false">
         <label for="download-token">接続キー</label>
-        <input id="download-token" type="password" autocomplete="off">
-        <button type="button" id="download-config-save">接続先を保存</button>
+        <input id="download-token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <div class="dialog-actions">
+          <button type="button" id="download-config-save">接続先を保存</button>
+          <button type="button" id="download-check">接続を確認</button>
+        </div>
+        <div class="download-links">
+          <a href="https://dashboard.render.com/web/srv-dc1c1dff3r2c73c9jcig" target="_blank" rel="noopener noreferrer">Renderの管理画面を開く</a>
+          <a id="download-health-link" target="_blank" rel="noopener noreferrer" hidden>登録先の稼働ページを開く</a>
+        </div>
+        <p class="feedback">Renderで「Environment」を開くと接続キー（OTODANA_TOKEN）を確認できます。</p>
       </div>
     </details>
     <progress id="download-progress" max="100" aria-label="保存の進み具合" hidden></progress>
@@ -223,6 +234,9 @@
     <div class="menu-heading"><h2 id="menu-title"></h2><button type="button" id="menu-close" aria-label="閉じる">×</button></div>
     <p id="menu-status"></p>
     <button type="button" id="menu-add" class="save" hidden><span aria-hidden="true">＋</span> フォルダへ一括追加</button>
+    <button type="button" id="menu-move-out" class="save" hidden>フォルダから出す</button>
+    <button type="button" id="menu-bulk-out" class="save" hidden>フォルダから一括で出す</button>
+    <button type="button" id="menu-bulk-delete" class="delete" hidden>一括削除</button>
     <button type="button" id="menu-details" class="save" hidden>曲の情報・編集</button>
     <button type="button" id="menu-save" class="save"><span aria-hidden="true">↓</span> 端末に保存</button>
     <button type="button" id="menu-delete" class="delete"><span aria-hidden="true">−</span> 音棚から削除</button>

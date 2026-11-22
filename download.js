@@ -3,6 +3,8 @@
 const downloadLimit = 128_000_000;
 const downloadConnectionKey = "otodana-download-connection";
 
+class DownloadConnectionError extends Error {}
+
 function readDownloadConnection() {
   try {
     return JSON.parse(localStorage.getItem(downloadConnectionKey)) ?? {};
@@ -16,13 +18,13 @@ function downloadServerOrigin(value) {
   try {
     server = new URL(value.trim());
   } catch {
-    throw new Error("取得サーバーのURLを入力してください。");
+    throw new DownloadConnectionError("取得サーバーのURLを入力してください。");
   }
   const loopback = ["127.0.0.1", "localhost", "[::1]"];
   const local = loopback.includes(server.hostname) && loopback.includes(location.hostname);
   if (server.username || server.password || server.pathname !== "/" || server.search || server.hash ||
       (server.protocol !== "https:" && !(local && server.protocol === "http:"))) {
-    throw new Error("取得サーバーのHTTPSアドレスを入力してください。");
+    throw new DownloadConnectionError("取得サーバーのHTTPSアドレスを入力してください。");
   }
   return server.origin;
 }
@@ -110,17 +112,17 @@ async function waitForRenderServer(origin, signal, showProgress) {
       if (Date.now() < deadline) await waitForDownloadRetry(signal);
     }
     signal.throwIfAborted();
-    throw new Error("取得サーバーが約2分以内に応答しませんでした。設定したURLやRenderの稼働状況を確認してください。");
+    throw new DownloadConnectionError("取得サーバーが約2分以内に応答しませんでした。「登録先の稼働ページ」で状態を確認してください。");
   } finally {
     clearTimeout(notice);
   }
 }
 
 async function createDownloadRequest(connection, signal, showProgress) {
-  if (!connection.origin || !connection.token) throw new Error("「取得サーバーの設定」を開き、URLと接続キーを保存してください。");
+  if (!connection.origin || !connection.token) throw new DownloadConnectionError("取得サーバーのURLと接続キーを保存してください。");
   const origin = downloadServerOrigin(connection.origin);
   if (new URL(origin).hostname.endsWith(".onrender.com")) await waitForRenderServer(origin, signal, showProgress);
-  return async (path, { method = "GET", body, requestSignal = signal } = {}) => {
+  return async (path, { method = "GET", body, requestSignal = signal, expectedStatus } = {}) => {
     let response;
     try {
       response = await fetch(origin + path, {
@@ -130,11 +132,14 @@ async function createDownloadRequest(connection, signal, showProgress) {
       });
     } catch (error) {
       if (requestSignal.aborted) throw error;
-      throw new Error("取得サーバーに接続できません。設定したURLやサーバーの動作をご確認ください。");
+      throw new DownloadConnectionError("取得サーバーに接続できません。「接続を確認」または「登録先の稼働ページ」から状況を確認してください。");
     }
-    if (!response.ok) {
+    if (response.status === 401) {
+      throw new DownloadConnectionError("接続キーが一致しません。Renderの管理画面で接続キーを確認してください。");
+    }
+    if (!response.ok && response.status !== expectedStatus) {
       const details = await response.json().catch(() => ({}));
-      throw new Error(typeof details.message === "string" ? details.message : "取得サーバーでエラーが発生しました。");
+      throw new Error(typeof details?.message === "string" ? details.message : "取得サーバーでエラーが発生しました。");
     }
     return response;
   };
@@ -187,71 +192,17 @@ function displayDownloadSize(bytes) {
   return amount + (megabytes ? " MB" : " KB");
 }
 
-async function downloadMediaKind(blob) {
-  const read = async (start, end) => new Uint8Array(await blob.slice(start, end).arrayBuffer());
-  const begins = (bytes, start, text) => Array.from(text).every((letter, index) => bytes[start + index] === letter.charCodeAt(0));
-  const mp3Frame = (bytes) => bytes.length >= 4 && bytes[0] === 255 && (bytes[1] & 0xe6) === 0xe2 &&
-    (bytes[1] & 0x18) !== 8 && (bytes[2] >> 4) !== 15 && (bytes[2] & 12) !== 12;
-  const bytes = await read(0, 16);
-  if (mp3Frame(bytes)) return "mp3";
-  if (begins(bytes, 0, "ID3") && bytes.length >= 10 && bytes.slice(6, 10).every((value) => value < 128)) {
-    const tagSize = bytes.slice(6, 10).reduce((size, value) => size * 128 + value, 0);
-    const footerSize = bytes[3] === 4 && (bytes[5] & 16) ? 10 : 0;
-    const start = 10 + tagSize + footerSize;
-    if (mp3Frame(await read(start, start + 4))) return "mp3";
-  }
-  if (["ftyp", "moov", "mdat", "wide"].some((type) => begins(bytes, 4, type)) ||
-      begins(bytes, 0, "OggS") || begins(bytes, 0, "fLaC") ||
-      (begins(bytes, 0, "RIFF") && begins(bytes, 8, "WAVE")) ||
-      (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3)) return "convertible";
-  throw new Error("このリンクやファイルに対応する動画・音声が見つかりませんでした。");
-}
-
-function convertedMedia(blob, format, signal, onProgress) {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      reject(signal.reason);
-      return;
-    }
-    const worker = new Worker("download-worker.js?v=16");
-    const finish = () => {
-      worker.terminate();
-      signal.removeEventListener("abort", abort);
-    };
-    const abort = () => {
-      finish();
-      reject(signal.reason);
-    };
-    signal.addEventListener("abort", abort, { once: true });
-    worker.onmessage = ({ data }) => {
-      if (data.phase) {
-        onProgress(data);
-        return;
-      }
-      finish();
-      if (data.error) reject(new Error(data.error));
-      else resolve(data.blob);
-    };
-    worker.onerror = () => {
-      finish();
-      reject(new Error("変換機能を実行できませんでした。音棚を開き直してお試しください。"));
-    };
-    worker.postMessage({ blob, format });
-  });
-}
-
 function setupMediaDownloads(saveMedia) {
   const find = (id) => document.getElementById(id);
   const dialog = find("download-dialog");
   const urlField = find("download-url");
-  const fileField = find("download-file");
-  const fileName = find("download-file-name");
   const config = find("download-config");
   const serverField = find("download-server");
   const tokenField = find("download-token");
   const saveConfig = find("download-config-save");
+  const checkConnection = find("download-check");
+  const healthLink = find("download-health-link");
   const menu = find("download-options");
-  const showOptions = find("download-formats");
   const progress = find("download-progress");
   const estimatePanel = find("download-estimate");
   const confirm = find("download-confirm");
@@ -265,6 +216,24 @@ function setupMediaDownloads(saveMedia) {
   serverField.value = connection.origin || "";
   tokenField.value = connection.token || "";
 
+  function updateHealthLink() {
+    try {
+      healthLink.href = downloadServerOrigin(serverField.value) + "/health";
+      healthLink.hidden = false;
+    } catch {
+      healthLink.removeAttribute("href");
+      healthLink.hidden = true;
+    }
+  }
+  function connectionFields() {
+    const origin = downloadServerOrigin(serverField.value);
+    const token = tokenField.value.trim();
+    if (token.length < 24) throw new DownloadConnectionError("取得サーバーの接続キーを入力してください。");
+    return { origin, token };
+  }
+  updateHealthLink();
+  serverField.addEventListener("input", updateHealthLink);
+
   function showProgress(text, percent) {
     progress.hidden = false;
     if (Number.isFinite(percent)) progress.value = percent;
@@ -275,6 +244,7 @@ function setupMediaDownloads(saveMedia) {
   function clearFeedback() {
     progress.hidden = true;
     estimatePanel.hidden = true;
+    menu.hidden = false;
     checkedDownload = null;
     message.textContent = "";
   }
@@ -292,13 +262,12 @@ function setupMediaDownloads(saveMedia) {
     clearFeedback();
     checkedDownload = input;
     menu.hidden = true;
-    showOptions.setAttribute("aria-expanded", "false");
     estimatePanel.hidden = false;
     confirm.focus();
   }
 
   function toggleRunning(running) {
-    for (const element of [urlField, fileField, showOptions, serverField, tokenField, saveConfig, ...formats]) element.disabled = running;
+    for (const element of [urlField, serverField, tokenField, saveConfig, checkConnection, ...formats]) element.disabled = running;
     cancel.hidden = !running;
     cancel.disabled = close.disabled = false;
   }
@@ -306,6 +275,7 @@ function setupMediaDownloads(saveMedia) {
   find("download-open").addEventListener("click", () => {
     if (dialog.open) return;
     find("add-dialog").close();
+    clearFeedback();
     dialog.showModal();
   });
   close.addEventListener("click", () => {
@@ -319,46 +289,25 @@ function setupMediaDownloads(saveMedia) {
   cancel.addEventListener("click", () => job?.abort());
   saveConfig.addEventListener("click", () => {
     try {
-      const origin = downloadServerOrigin(serverField.value);
-      const token = tokenField.value.trim();
-      if (token.length < 24) throw new Error("取得サーバーの接続キーを入力してください。");
-      const settings = { origin, token };
+      const settings = connectionFields();
       localStorage.setItem(downloadConnectionKey, JSON.stringify(settings));
       connection = settings;
-      config.open = false;
       clearFeedback();
       message.textContent = "取得サーバーの設定を保存しました。";
     } catch (error) {
       message.textContent = error.message;
     }
   });
-  urlField.addEventListener("input", () => {
-    fileField.value = "";
-    fileName.textContent = "";
-    clearFeedback();
-  });
-  fileField.addEventListener("change", () => {
-    const file = fileField.files[0];
-    if (file) urlField.value = "";
-    fileName.textContent = file?.name ?? "";
-    clearFeedback();
-  });
-  showOptions.addEventListener("click", () => {
-    if (checkedDownload) clearFeedback();
-    menu.hidden = !menu.hidden;
-    showOptions.setAttribute("aria-expanded", String(!menu.hidden));
-  });
+  urlField.addEventListener("input", clearFeedback);
   find("download-estimate-back").addEventListener("click", () => {
     clearFeedback();
-    menu.hidden = false;
-    showOptions.setAttribute("aria-expanded", "true");
     formats[0].focus();
   });
   confirm.addEventListener("click", () => {
     if (checkedDownload) run(checkedDownload.format, checkedDownload.url);
   });
 
-  async function run(format, approvedUrl) {
+  async function runTask(operation) {
     if (job) return;
     clearFeedback();
     const controller = new AbortController();
@@ -369,52 +318,53 @@ function setupMediaDownloads(saveMedia) {
       if (!/^https?:$/.test(location.protocol)) {
         throw new Error("この機能はGitHub Pagesの公開ページか、Windowsのローカルサーバーで使えます。");
       }
-      const file = fileField.files[0];
-      let input;
-      let output;
-      if (file) {
-        if (!file.size || file.size > downloadLimit) throw new Error("変換するファイルは128MB以下のものを選んでください。");
-        input = { blob: file, name: file.name };
-        const kind = await downloadMediaKind(input.blob);
-        output = kind === "mp3" && format === "mp3"
-          ? input.blob.slice(0, input.blob.size, "audio/mpeg")
-          : await convertedMedia(input.blob, format, signal, ({ phase, percent }) => {
-            if (phase === "engine") showProgress("変換機能を読み込んでいます…");
-            else showProgress("端末内で" + format.toUpperCase() + "に変換中…" +
-              (percent === undefined ? "" : " " + percent + "%"), percent);
-          });
-      } else {
-        const url = approvedUrl ?? urlField.value.trim();
-        if (!url) throw new Error("YouTubeまたはニコニコ動画の共有リンクを入力してください。");
-        if (!connection.origin || !connection.token) config.open = true;
-        const request = await createDownloadRequest(connection, signal, showProgress);
-        if (!approvedUrl) {
-          showProgress("動画の容量を確認しています…");
-          const response = await request("/api/downloads/estimate", { method: "POST", body: { url, format } });
-          const estimate = await response.json();
-          signal.throwIfAborted();
-          showEstimate(estimate, { url, format });
-          return;
-        }
-        input = await downloadVideoPage(url, format, request, signal, showProgress);
-        output = input.blob;
-      }
-      if (signal.aborted) throw signal.reason;
-      cancel.disabled = close.disabled = true;
-      showProgress("ライブラリに保存しています…");
-      const name = (input.name ?? "").replace(/\.[a-z0-9]{1,6}$/i, "").replace(/[\\/:*?"<>|\p{Cc}]+/gu, " ").trim();
-      await saveMedia(output, (name.slice(0, 180) || "ダウンロード") + "." + format, format);
-      urlField.value = fileField.value = "";
-      fileName.textContent = "";
-      clearFeedback();
-      dialog.close();
+      await operation(signal);
     } catch (error) {
       progress.hidden = true;
+      if (error instanceof DownloadConnectionError) config.open = true;
       message.textContent = signal.aborted ? "中止しました。" : error.message;
     } finally {
       job = null;
       toggleRunning(false);
     }
+  }
+
+  checkConnection.addEventListener("click", () => runTask(async (signal) => {
+    showProgress("取得サーバーの応答を確認しています…");
+    const request = await createDownloadRequest(connectionFields(), signal, showProgress);
+    // An empty estimate is rejected after authentication and starts no download.
+    const response = await request("/api/downloads/estimate", { method: "POST", body: {}, expectedStatus: 400 });
+    const result = await response.json().catch(() => ({}));
+    if (response.status !== 400 || result?.message !== "動画の共有リンクと保存形式を確認してください。") {
+      throw new DownloadConnectionError("応答を受け取りましたが、音棚の取得サーバーとして確認できませんでした。");
+    }
+    progress.hidden = true;
+    message.textContent = "取得サーバーに接続できました。接続キーも有効です。";
+  }));
+
+  function run(format, approvedUrl) {
+    return runTask(async (signal) => {
+      const url = approvedUrl ?? urlField.value.trim();
+      if (!url) throw new Error("YouTubeまたはニコニコ動画の共有リンクを入力してください。");
+      const request = await createDownloadRequest(connection, signal, showProgress);
+      if (!approvedUrl) {
+        showProgress("動画の容量を確認しています…");
+        const response = await request("/api/downloads/estimate", { method: "POST", body: { url, format } });
+        const estimate = await response.json();
+        signal.throwIfAborted();
+        showEstimate(estimate, { url, format });
+        return;
+      }
+      const input = await downloadVideoPage(url, format, request, signal, showProgress);
+      signal.throwIfAborted();
+      cancel.disabled = close.disabled = true;
+      showProgress("ライブラリに保存しています…");
+      const name = (input.name ?? "").replace(/\.[a-z0-9]{1,6}$/i, "").replace(/[\\/:*?"<>|\p{Cc}]+/gu, " ").trim();
+      await saveMedia(input.blob, (name.slice(0, 180) || "ダウンロード") + "." + format, format);
+      urlField.value = "";
+      clearFeedback();
+      dialog.close();
+    });
   }
 
   for (const format of formats) format.addEventListener("click", () => run(format.value));

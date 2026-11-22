@@ -22,6 +22,8 @@ const mediaFormats = {
 const picker = get("file-picker");
 const addTracks = get("add-tracks");
 const addDialog = get("add-dialog");
+const library = get("library");
+const librarySearch = get("search").closest(".library-search");
 const list = get("tracks");
 const search = get("search");
 const seek = get("seek");
@@ -33,21 +35,21 @@ const queueToggle = get("queue-toggle");
 const queuePanel = get("queue-panel");
 const queueCurrent = get("queue-current");
 const queueList = get("queue-list");
+const historyHeading = get("history-heading");
+const historyClear = get("history-clear");
 const shuffleToggle = get("shuffle-toggle");
 const repeatToggle = get("repeat-toggle");
 const queueArtwork = get("queue-artwork");
 const queueVideoSlot = queueArtwork.parentElement;
 const artwork = get("artwork");
 const miniArtwork = get("mini-artwork");
-const miniVideo = get("mini-video");
-const libraryVideo = document.createElement("canvas");
-libraryVideo.className = "thumb-video";
-libraryVideo.width = libraryVideo.height = 128;
-libraryVideo.hidden = true;
-const waveform = document.createElement("span");
-waveform.className = "track-waveform";
-waveform.innerHTML = "<i></i>".repeat(6);
+const videoPoster = get("video-poster");
+const libraryWaveform = createWaveform();
+queueVideoSlot.append(createWaveform());
+videoStage.append(createWaveform());
 const menu = get("track-menu");
+const menuActions = Array.from(menu.querySelectorAll(":scope > button"));
+const librarySettings = get("library-settings");
 const deleteMode = get("delete-mode");
 const deleteDialog = get("delete-dialog");
 const folderList = get("folders");
@@ -58,7 +60,6 @@ const selectionConfirm = get("selection-confirm");
 const detailsDialog = get("track-details");
 const detailsSave = get("details-save");
 const detailsImage = get("details-image");
-const folderExclude = get("folder-exclude");
 const mobile = matchMedia("(max-width: 730px)");
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 const historyScroll = { touchSide: 0, touching: false, touchUntil: 0, lastWheel: -Infinity, wheelSide: 0, wheelStopped: false };
@@ -70,7 +71,7 @@ let activeFolder = null;
 let playbackFolder = null;
 let playbackQuery = "";
 let menuFolder = null;
-let folderSelection = null;
+let trackSelection = null;
 let customTrackOrder = false;
 const queue = new PlaybackQueue();
 const historyKey = "otodana-playback-history";
@@ -93,8 +94,6 @@ let backdrop = null;
 let importQueue = Promise.resolve();
 let saveToastTimer;
 let videoLayoutFrame = 0;
-let libraryPreviewFrame = 0;
-let lastLibraryPreview = 0;
 let activeLibraryButton = null;
 let seekDrag = null;
 let fullscreenControlsTimer;
@@ -107,15 +106,26 @@ const marqueeRows = new WeakMap();
 const marqueeObserver = typeof ResizeObserver === "function"
   ? new ResizeObserver((entries) => entries.forEach(({ target }) => measureMarquee(target))) : null;
 
+function libraryScrollArea() {
+  return mobile.matches ? library : document.scrollingElement;
+}
+
+function createWaveform() {
+  const waveform = document.createElement("span");
+  waveform.className = "track-waveform";
+  waveform.setAttribute("aria-hidden", "true");
+  waveform.innerHTML = "<i></i>".repeat(6);
+  return waveform;
+}
+
 function syncLayout() {
   const fullscreen = document.body.hasAttribute("data-video-expanded");
   const expanded = fullscreen || (mobile.matches && document.body.dataset.view === "player");
-  get("library").inert = expanded;
+  library.inert = expanded;
   miniPlayer.inert = expanded;
   player.inert = mobile.matches && !expanded;
   get("theme-color").content = expanded && !fullscreen ? "#132a22" : "#000000";
   scheduleVideoLayout();
-  updateLibraryPreview();
 }
 
 function showView(view) {
@@ -169,49 +179,9 @@ function updatePlayback() {
   }
   updateVideoTools();
   activeLibraryButton?.toggleAttribute("data-playing", playing);
-  updateLibraryPreview();
+  queueCurrent.toggleAttribute("data-playing", playing);
+  videoStage.toggleAttribute("data-ended", media === video && video.ended);
   scheduleVideoLayout();
-}
-
-function libraryPreviewVisible() {
-  const libraryVisible = !mobile.matches || document.body.dataset.view === "library";
-  return libraryVisible && !document.body.hasAttribute("data-video-expanded") && !document.hidden &&
-    media === video && !video.paused && !video.ended && !video.error && video.readyState >= 2;
-}
-
-function drawLibraryPreview(now) {
-  libraryPreviewFrame = 0;
-  if (!libraryPreviewVisible()) return;
-  if (now - lastLibraryPreview >= 40) {
-    lastLibraryPreview = now;
-    const side = Math.min(video.videoWidth, video.videoHeight);
-    if (side > 0) {
-      const miniContext = miniVideo.getContext("2d");
-      if (miniContext) {
-        miniContext.drawImage(video, (video.videoWidth - side) / 2, (video.videoHeight - side) / 2,
-          side, side, 0, 0, miniVideo.width, miniVideo.height);
-        miniVideo.hidden = false;
-        if (libraryVideo.isConnected) {
-          const context = libraryVideo.getContext("2d");
-          if (context) {
-            context.drawImage(miniVideo, 0, 0);
-            libraryVideo.hidden = false;
-          }
-        }
-      }
-    }
-  }
-  libraryPreviewFrame = requestAnimationFrame(drawLibraryPreview);
-}
-
-function updateLibraryPreview() {
-  if (libraryPreviewVisible()) {
-    if (!libraryPreviewFrame) libraryPreviewFrame = requestAnimationFrame(drawLibraryPreview);
-  } else {
-    cancelAnimationFrame(libraryPreviewFrame);
-    libraryPreviewFrame = 0;
-    miniVideo.hidden = libraryVideo.hidden = true;
-  }
 }
 
 function trackTitle(track) {
@@ -297,7 +267,7 @@ function queueTrackButton(track, action) {
     if (!track.thumbnail) {
       thumbnail.track = track;
       if (queueThumbnailObserver) queueThumbnailObserver.observe(thumbnail);
-      else showQueueThumbnail(thumbnail);
+      else showTrackThumbnail(thumbnail);
     }
   }
   const title = document.createElement("span");
@@ -307,7 +277,7 @@ function queueTrackButton(track, action) {
   return button;
 }
 
-async function showQueueThumbnail(thumbnail) {
+async function showTrackThumbnail(thumbnail) {
   const track = thumbnail.track;
   track.preview ??= loadTrackPreview(track);
   await track.preview;
@@ -322,7 +292,7 @@ const queueThumbnailObserver = "IntersectionObserver" in window ? new Intersecti
   for (const entry of entries) {
     if (!entry.isIntersecting) continue;
     queueThumbnailObserver.unobserve(entry.target);
-    showQueueThumbnail(entry.target);
+    showTrackThumbnail(entry.target);
   }
 }, { root: queuePanel, rootMargin: "64px" }) : null;
 
@@ -343,6 +313,7 @@ function renderQueue(anchor = false) {
   });
   get("history-list").replaceChildren(...historyRows);
   get("history-empty").hidden = history.length > 0;
+  historyClear.disabled = !history.length;
   const rows = queue.upcoming.map((track) => {
     const row = document.createElement("li");
     row.className = "queue-row";
@@ -377,13 +348,16 @@ function renderQueue(anchor = false) {
     releaseQueueScroll();
   }
   queuePanel.scrollTop = anchor ? queueCurrent.offsetTop : scroll;
-  updateHistoryHeading();
+  scheduleVideoLayout();
 }
 
-function updateHistoryHeading() {
-  queuePanel.dataset.history = String(queuePanel.scrollTop < queueCurrent.offsetTop - 2);
-  if (player.dataset.queue === "true") scheduleVideoLayout();
-}
+historyClear.addEventListener("click", () => {
+  const playingEntry = recordedCurrent && queue.history.at(-1) === current;
+  queue.history = playingEntry ? [current] : [];
+  saveHistory();
+  renderQueue();
+  queuePanel.scrollTop = 0;
+});
 
 function scrollSide(position) {
   const difference = position - queueCurrent.offsetTop;
@@ -414,7 +388,7 @@ function settleAfterTouch() {
 }
 
 queuePanel.addEventListener("scroll", () => {
-  updateHistoryHeading();
+  scheduleVideoLayout();
   settleAfterTouch();
 }, { passive: true });
 queuePanel.addEventListener("touchstart", (event) => {
@@ -460,7 +434,7 @@ function removeQueued(track) {
   tellPlayer("「" + trackTitle(track) + "」を再生待ちから外しました。");
 }
 
-const cancelQueueGesture = bindQueueGestures(queueList, queuePanel, {
+const cancelQueueGesture = bindQueueGestures(queueList, () => queuePanel, {
   reorder: (track, index) => { queue.reorder(track, index); renderQueue(); },
   remove: removeQueued,
 }, reducedMotion);
@@ -506,10 +480,12 @@ function updateSelection() {
     else showQueue(false);
   }
   document.body.dataset.hasTrack = String(Boolean(current));
+  for (const row of folderList.children) row.toggleAttribute("data-current", Boolean(current && row.folder === current.folder));
   activeLibraryButton = null;
   for (const row of list.children) {
     const button = row.querySelector(".track-select");
     const active = row.track === current;
+    row.toggleAttribute("data-current", active);
     if (active) {
       button.setAttribute("aria-current", "true");
       activeLibraryButton = button;
@@ -520,10 +496,9 @@ function updateSelection() {
   }
   if (activeLibraryButton) {
     const thumbnail = activeLibraryButton.querySelector(".thumb");
-    if (libraryVideo.parentElement !== thumbnail) thumbnail.append(libraryVideo, waveform);
+    if (libraryWaveform.parentElement !== thumbnail) thumbnail.append(libraryWaveform);
   } else {
-    libraryVideo.remove();
-    waveform.remove();
+    libraryWaveform.remove();
   }
   updatePlayback();
   updateTime();
@@ -536,6 +511,7 @@ async function play() {
   try {
     if (media.error) media.load();
     await media.play();
+    if (request === playRequest) updatePlayback();
   } catch (error) {
     if (request !== playRequest) return;
     tellPlayer(error.name === "NotAllowedError"
@@ -547,7 +523,7 @@ async function play() {
 
 function clearArtwork() {
   ++artworkRequest;
-  for (const image of [artwork, miniArtwork, queueArtwork]) {
+  for (const image of [artwork, miniArtwork, queueArtwork, videoPoster]) {
     image.hidden = true;
     image.removeAttribute("src");
   }
@@ -587,7 +563,6 @@ function setBackdrop(image) {
 function clearSource(nextMedia = audio) {
   ++playRequest;
   seekDrag = null;
-  miniVideo.hidden = libraryVideo.hidden = true;
   media.pause();
   if (media === video) {
     if (nextMedia !== video) closeVideoExpanded();
@@ -655,7 +630,11 @@ async function showArtwork(track) {
     await artwork.decode();
     if (request !== artworkRequest) return;
     artwork.hidden = false;
-    if (isVideo(track)) video.poster = artworkUrl;
+    if (isVideo(track)) {
+      video.poster = artworkUrl;
+      videoPoster.src = artworkUrl;
+      videoPoster.hidden = false;
+    }
     miniArtwork.src = artworkUrl;
     miniArtwork.hidden = false;
     queueArtwork.src = artworkUrl;
@@ -924,24 +903,29 @@ async function saveImportedTracks(added, invalid) {
   if (saved) showSaveToast(saved);
 }
 
-async function deleteTrack(track) {
-  if (track.busy || !tracks.includes(track)) return;
-  if (track.id !== undefined) {
-    track.busy = "delete";
-    renderTracks();
-    try {
-      await trackStore.deleteTrack(database, track.id);
-    } catch {
-      track.busy = null;
-      renderTracks();
-      trackFeedback(track, "保存した曲を削除できませんでした。アプリを開き直してからお試しください。");
-      return;
-    }
+async function deleteTracks(entries) {
+  if (entries.some((track) => track.busy || !tracks.includes(track))) {
+    tellLibrary("処理中の曲が含まれています。完了後にもう一度お試しください。");
+    return false;
   }
-  const index = tracks.indexOf(track);
-  queue.remove(track, current === track);
+  const savedIds = entries.filter((track) => track.id !== undefined).map((track) => track.id);
+  for (const track of entries) track.busy = "delete";
+  renderTracks();
+  try {
+    if (savedIds.length) await trackStore.deleteTracks(database, savedIds);
+  } catch {
+    for (const track of entries) track.busy = null;
+    renderTracks();
+    tellLibrary("保存した曲を削除できませんでした。アプリを開き直してからお試しください。");
+    return false;
+  }
+  const removed = new Set(entries);
+  for (const track of entries) {
+    queue.remove(track, current === track);
+    if (track.thumbnail) URL.revokeObjectURL(track.thumbnail);
+  }
   saveHistory();
-  if (track === current) {
+  if (removed.has(current)) {
     clearSource();
     setBackdrop(null);
     current = null;
@@ -949,20 +933,24 @@ async function deleteTrack(track) {
     tellPlayer("");
     showView("library");
   }
-  tracks.splice(index, 1);
-  if (track.folder) track.folder.tracks = track.folder.tracks.filter((entry) => entry !== track);
-  folderSelection?.chosen.delete(track);
-  if (customTrackOrder || folders.length) persistLibrary();
-  if (track.thumbnail) URL.revokeObjectURL(track.thumbnail);
+  for (let index = tracks.length - 1; index >= 0; --index) {
+    if (removed.has(tracks[index])) tracks.splice(index, 1);
+  }
+  for (const folder of folders) folder.tracks = folder.tracks.filter((track) => !removed.has(track));
   renderTracks();
-  tellLibrary("「" + trackTitle(track) + "」を音棚から削除しました。");
+  tellLibrary(entries.length === 1 ? "「" + trackTitle(entries[0]) + "」を音棚から削除しました。"
+    : entries.length + "曲を音棚から削除しました。");
+  if (customTrackOrder || folders.length) await persistLibrary();
+  return true;
 }
 
-function confirmDeletion(track) {
-  if (track.busy || deleteDialog.open) return;
-  pendingDeletion = track;
+function confirmDeletion(entries) {
+  if (!entries.length || entries.some((track) => track.busy) || deleteDialog.open) return;
+  pendingDeletion = entries;
   deleteDialog.returnValue = "";
-  get("delete-song").textContent = "「" + trackTitle(track) + "」を音棚から削除します。";
+  get("delete-song").textContent = trackSelection?.mode === "delete"
+    ? entries.length + "曲を音棚から削除します。"
+    : "「" + trackTitle(entries[0]) + "」を音棚から削除します。";
   deleteDialog.showModal();
 }
 
@@ -971,8 +959,12 @@ function setDeleteMode(enabled) {
   list.toggleAttribute("data-deleting", enabled);
   deleteMode.setAttribute("aria-pressed", String(enabled));
   deleteMode.setAttribute("aria-label", enabled ? "編集を完了" : "曲を編集");
-  folderExclude.hidden = !enabled || !activeFolder;
   cancelLibraryGesture();
+}
+
+function showTrackMenuActions(...ids) {
+  for (const button of menuActions) button.hidden = !ids.includes(button.id);
+  menu.showModal();
 }
 
 function openTrackMenu(track) {
@@ -981,13 +973,10 @@ function openTrackMenu(track) {
   get("menu-title").textContent = trackTitle(track);
   const saved = track.id !== undefined;
   get("menu-status").textContent = saved ? "端末に保存済み" : "このセッションで再生できます";
-  get("menu-add").hidden = true;
-  get("menu-details").hidden = false;
-  get("menu-delete").hidden = false;
-  get("menu-save").hidden = saved;
   get("menu-save").disabled = !database || Boolean(track.busy);
   get("menu-delete").disabled = Boolean(track.busy);
-  menu.showModal();
+  get("menu-move-out").disabled = Boolean(track.busy);
+  showTrackMenuActions("menu-details", "menu-delete", ...(saved ? [] : ["menu-save"]), ...(track.folder ? ["menu-move-out"] : []));
 }
 
 function closeTrackMenu(afterClose) {
@@ -1172,7 +1161,7 @@ function updateTrackRow(row) {
   const title = trackTitle(track);
   row.querySelector(".track-name").textContent = title;
   const artist = row.querySelector(".track-artist");
-  artist.textContent = trackArtist(track) || trackAlbum(track) || (isVideo(track) ? track.format.toUpperCase() + " 動画" : "");
+  artist.textContent = trackArtist(track) || trackAlbum(track);
   artist.hidden = !artist.textContent;
   row.querySelector(".more").setAttribute("aria-label", title + "の操作");
   row.querySelector(".track-delete").setAttribute("aria-label", title + "を削除");
@@ -1194,7 +1183,8 @@ const thumbnailObserver = "IntersectionObserver" in window ? new IntersectionObs
   for (const entry of entries) {
     if (!entry.isIntersecting) continue;
     thumbnailObserver.unobserve(entry.target);
-    prepareTrackRow(entry.target);
+    if (entry.target.classList.contains("folder-icon")) showTrackThumbnail(entry.target);
+    else prepareTrackRow(entry.target);
   }
 }, { rootMargin: "64px" }) : null;
 
@@ -1242,7 +1232,7 @@ function showFolder(folder) {
   get("folder-back").hidden = !folder;
   get("library-title").tabIndex = -1;
   get("library-title").focus({ preventScroll: true });
-  document.scrollingElement.scrollTop = 0;
+  libraryScrollArea().scrollTop = 0;
   search.value = "";
   tellLibrary("");
   filterLibrary();
@@ -1253,16 +1243,22 @@ function openFolderMenu(folder) {
   menuFolder = folder;
   get("menu-title").textContent = folder.name;
   get("menu-status").textContent = folder.tracks.length + " 曲";
-  get("menu-add").hidden = false;
-  get("menu-details").hidden = true;
-  get("menu-save").hidden = true;
-  get("menu-delete").hidden = true;
-  menu.showModal();
+  showTrackMenuActions("menu-add");
+}
+
+function openLibraryMenu() {
+  if (menu.open) return;
+  const available = visibleLibraryTracks();
+  get("menu-title").textContent = activeFolder ? activeFolder.name + "の設定" : "ライブラリの設定";
+  get("menu-status").textContent = available.length + " 曲";
+  get("menu-bulk-out").disabled = !available.length;
+  get("menu-bulk-delete").disabled = !available.some((track) => !track.busy);
+  showTrackMenuActions("menu-bulk-delete", ...(activeFolder ? ["menu-bulk-out"] : []));
 }
 
 function renderFolders(query) {
   folderList.replaceChildren();
-  if (activeFolder || folderSelection) return;
+  if (activeFolder || trackSelection) return;
   for (const folder of folders) {
     if (query && !containsQuery(folder.name, query)) continue;
     const row = document.createElement("li");
@@ -1271,7 +1267,7 @@ function renderFolders(query) {
     const open = document.createElement("button");
     open.type = "button";
     open.className = "track-select";
-    open.innerHTML = '<span class="thumb folder-icon" aria-hidden="true"></span><span class="track-copy"><span class="track-name"></span><span class="track-artist"></span></span>';
+    open.innerHTML = '<span class="thumb folder-icon" aria-hidden="true"><img alt="" hidden></span><span class="track-copy"><span class="track-name"></span><span class="track-artist"></span></span>';
     open.querySelector(".track-name").textContent = folder.name;
     open.querySelector(".track-artist").textContent = folder.tracks.length + " 曲";
     open.addEventListener("click", () => showFolder(folder));
@@ -1283,49 +1279,56 @@ function renderFolders(query) {
     more.addEventListener("click", () => openFolderMenu(folder));
     row.append(open, more);
     folderList.append(row);
+    const thumbnail = open.querySelector(".folder-icon");
+    const first = folder.tracks[0];
+    if (first) {
+      thumbnail.track = first;
+      if (first.thumbnail || !thumbnailObserver) showTrackThumbnail(thumbnail);
+      else thumbnailObserver.observe(thumbnail);
+    }
   }
 }
 
-function setFolderSelection(folder, removing = false) {
-  folderSelection = folder ? { folder, removing, chosen: new Set() } : null;
+function setTrackSelection(mode, folder = activeFolder) {
+  trackSelection = mode ? { folder, mode, chosen: new Set() } : null;
   get("selection-cancel").disabled = false;
-  selectionBar.hidden = !folder;
-  if (folder) {
+  selectionBar.hidden = !mode;
+  if (mode) {
     setDeleteMode(false);
     tellLibrary("");
-    get("selection-title").textContent = removing ? "フォルダから曲を除外" : "フォルダへ一括追加";
-    list.dataset.selecting = removing ? "remove" : "add";
-    document.scrollingElement.scrollTop = 0;
+    get("selection-title").textContent = { add: "フォルダへ一括追加", remove: "フォルダから一括で出す", delete: "一括削除" }[mode];
+    selectionConfirm.textContent = mode === "delete" ? "削除" : "確定";
+    list.dataset.selecting = mode;
+    libraryScrollArea().scrollTop = 0;
   } else {
     delete list.dataset.selecting;
   }
   search.value = "";
   filterLibrary();
-  if (folder) get("selection-cancel").focus({ preventScroll: true });
-  else (deleteMode.disabled ? get("library-title") : deleteMode).focus({ preventScroll: true });
+  (mode ? get("selection-cancel") : librarySettings).focus({ preventScroll: true });
 }
 
 function updateSelectionRow(row) {
   const button = row.querySelector(".track-select");
-  if (folderSelection) button.setAttribute("aria-pressed", String(folderSelection.chosen.has(row.track)));
+  if (trackSelection) button.setAttribute("aria-pressed", String(trackSelection.chosen.has(row.track)));
 }
 
 function renderTracks() {
   cancelLibraryGesture();
   thumbnailObserver?.disconnect();
   newFolder.disabled = !database;
-  newFolder.hidden = Boolean(activeFolder || folderSelection);
-  list.toggleAttribute("data-folder", Boolean(activeFolder));
-  deleteMode.hidden = Boolean(folderSelection);
-  get("folder-back").hidden = !activeFolder || Boolean(folderSelection);
+  newFolder.hidden = Boolean(activeFolder || trackSelection);
+  deleteMode.hidden = librarySettings.hidden = Boolean(trackSelection);
+  librarySettings.setAttribute("aria-label", activeFolder ? "フォルダの設定" : "ライブラリの設定");
+  get("folder-back").hidden = !activeFolder || Boolean(trackSelection);
   get("storage-summary").hidden = Boolean(activeFolder);
-  addTracks.hidden = Boolean(activeFolder || folderSelection);
+  addTracks.hidden = Boolean(activeFolder || trackSelection);
   list.replaceChildren();
   const query = search.value.trim().normalize("NFKC").toLocaleLowerCase("ja");
   renderFolders(query);
   const libraryTracks = visibleLibraryTracks();
   deleteMode.disabled = !libraryTracks.length;
-  selectionConfirm.disabled = !folderSelection?.chosen.size;
+  selectionConfirm.disabled = !trackSelection?.chosen.size || Boolean(trackSelection?.saving);
   if (deleteMode.disabled && deleting) setDeleteMode(false);
   const matches = matchingTracks(libraryTracks, query);
   for (const track of matches) {
@@ -1337,9 +1340,9 @@ function renderTracks() {
     select.className = "track-select";
     select.innerHTML = '<span class="thumb" aria-hidden="true"><img alt="" hidden></span><span class="track-copy"><span class="track-name"></span><span class="track-artist" hidden></span></span>';
     select.addEventListener("click", () => {
-      if (folderSelection) {
-        if (folderSelection.saving) return;
-        const { chosen } = folderSelection;
+      if (trackSelection) {
+        if (trackSelection.saving || (trackSelection.mode === "delete" && track.busy)) return;
+        const { chosen } = trackSelection;
         if (!chosen.delete(track)) chosen.add(track);
         selectionConfirm.disabled = !chosen.size;
         updateSelectionRow(row);
@@ -1359,13 +1362,15 @@ function renderTracks() {
     remove.className = "track-delete";
     remove.disabled = Boolean(track.busy);
     remove.innerHTML = '<span aria-hidden="true"></span>';
-    remove.addEventListener("click", () => confirmDeletion(track));
+    remove.addEventListener("click", () => confirmDeletion([track]));
     const handle = document.createElement("button");
     handle.type = "button";
     handle.className = "queue-handle library-handle";
     handle.innerHTML = '<span class="queue-symbol" aria-hidden="true"></span>';
-    row.append(select);
-    row.append(more, remove, handle);
+    const actions = document.createElement("div");
+    actions.className = "track-actions";
+    actions.append(more, remove, handle);
+    row.append(select, actions);
     updateSelectionRow(row);
     updateTrackRow(row);
     list.append(row);
@@ -1433,16 +1438,16 @@ search.addEventListener("input", filterLibrary);
 function folderAtPointer(event) {
   if (!event || !deleting) return null;
   const { clientX, clientY } = event;
-  if (clientY < search.closest(".library-search").getBoundingClientRect().bottom) return null;
+  if (clientY < librarySearch.getBoundingClientRect().bottom) return null;
   return Array.from(folderList.children).find((row) => {
     const { left, top, right, bottom } = row.getBoundingClientRect();
     return clientX >= left && clientX <= right && clientY >= top && clientY <= bottom;
   });
 }
 
-const cancelLibraryGesture = bindQueueGestures(list, document.scrollingElement, {
+const cancelLibraryGesture = bindQueueGestures(list, libraryScrollArea, {
   scrollDrag({ clientY }) {
-    const topEdge = search.closest(".library-search").getBoundingClientRect().bottom + 24;
+    const topEdge = librarySearch.getBoundingClientRect().bottom + 24;
     const bottom = mobile.matches && !miniPlayer.hidden ? miniPlayer.getBoundingClientRect().top : window.innerHeight;
     const bottomEdge = bottom - 34;
     if (clientY < topEdge) return -Math.min(14, Math.ceil((topEdge - clientY) / 3));
@@ -1485,7 +1490,7 @@ const cancelLibraryGesture = bindQueueGestures(list, document.scrollingElement, 
   },
 }, reducedMotion);
 deleteMode.addEventListener("click", () => setDeleteMode(!deleting));
-folderExclude.addEventListener("click", () => setFolderSelection(activeFolder, true));
+librarySettings.addEventListener("click", openLibraryMenu);
 get("folder-back").addEventListener("click", () => showFolder(null));
 const folderName = get("folder-name");
 newFolder.addEventListener("click", () => {
@@ -1509,28 +1514,42 @@ createFolderDialog.querySelector("form").addEventListener("submit", (event) => {
   search.value = "";
   filterLibrary();
 });
-get("selection-cancel").addEventListener("click", () => setFolderSelection(null));
+get("selection-cancel").addEventListener("click", () => setTrackSelection(null));
 selectionConfirm.addEventListener("click", async () => {
-  if (!folderSelection) return;
-  const selection = folderSelection;
-  const { chosen, folder, removing } = selection;
+  if (!trackSelection || trackSelection.saving) return;
+  const selection = trackSelection;
+  const { chosen, folder, mode } = selection;
   const entries = visibleLibraryTracks().filter((track) => chosen.has(track));
+  if (mode === "delete") {
+    confirmDeletion(entries);
+    return;
+  }
   selection.saving = true;
   selectionConfirm.disabled = true;
   get("selection-cancel").disabled = true;
-  await moveIntoFolder(entries, removing ? null : folder);
-  if (folderSelection === selection) setFolderSelection(null);
+  await moveIntoFolder(entries, mode === "remove" ? null : folder);
+  if (trackSelection === selection) setTrackSelection(null);
   else renderTracks();
 });
-deleteDialog.addEventListener("close", () => {
-  const track = pendingDeletion;
+deleteDialog.addEventListener("close", async () => {
+  const entries = pendingDeletion;
   pendingDeletion = null;
-  if (track && deleteDialog.returnValue === "delete") {
-    deleteTrack(track).then(() => {
-      if (!document.activeElement || document.activeElement === document.body) {
-        (deleteMode.disabled ? (addTracks.hidden ? get("library-title") : addTracks) : deleteMode).focus({ preventScroll: true });
-      }
-    });
+  if (!entries || deleteDialog.returnValue !== "delete") return;
+  const selection = trackSelection;
+  if (selection) {
+    selection.saving = true;
+    get("selection-cancel").disabled = true;
+  }
+  const deleted = await deleteTracks(entries);
+  if (selection && trackSelection === selection) {
+    if (deleted) setTrackSelection(null);
+    else {
+      selection.saving = false;
+      get("selection-cancel").disabled = false;
+      renderTracks();
+    }
+  } else if (document.activeElement === document.body) {
+    (deleteMode.disabled ? librarySettings : deleteMode).focus({ preventScroll: true });
   }
 });
 get("library-tab").addEventListener("click", () => showView("library"));
@@ -1720,8 +1739,19 @@ get("menu-save").addEventListener("click", () => {
 });
 get("menu-add").addEventListener("click", () => {
   const folder = menuFolder;
-  if (folder) closeTrackMenu(() => setFolderSelection(folder));
+  if (folder) closeTrackMenu(() => setTrackSelection("add", folder));
 });
+get("menu-move-out").addEventListener("click", () => {
+  const track = menuTrack;
+  if (!track?.folder || track.busy) return;
+  closeTrackMenu(async () => {
+    if (!tracks.includes(track) || track.busy) return;
+    await moveIntoFolder([track], null);
+    filterLibrary();
+  });
+});
+get("menu-bulk-out").addEventListener("click", () => closeTrackMenu(() => setTrackSelection("remove")));
+get("menu-bulk-delete").addEventListener("click", () => closeTrackMenu(() => setTrackSelection("delete")));
 get("menu-details").addEventListener("click", () => {
   const track = menuTrack;
   if (track) closeTrackMenu(() => openTrackDetails(track));
@@ -1809,7 +1839,7 @@ get("details-form").addEventListener("submit", async (event) => {
 });
 get("menu-delete").addEventListener("click", () => {
   const track = menuTrack;
-  if (track) closeTrackMenu(() => confirmDeletion(track));
+  if (track) closeTrackMenu(() => confirmDeletion([track]));
 });
 get("previous").addEventListener("click", () => move(-1));
 get("next").addEventListener("click", () => move(1));
@@ -1878,7 +1908,6 @@ document.addEventListener("contextmenu", (event) => {
     event.preventDefault();
   }
 });
-document.addEventListener("visibilitychange", updateLibraryPreview);
 
 function scheduleVideoLayout() {
   if (videoLayoutFrame) return;
@@ -1896,8 +1925,7 @@ function updateVideoLayout() {
   let clipTop = 0;
   let clipBottom = 0;
   if (queued) {
-    const historyTop = queuePanel.dataset.history === "true" ? get("history-title").offsetHeight : 0;
-    clipTop = Math.max(0, panel.top + historyTop - target.top);
+    clipTop = Math.max(0, Math.max(panel.top, historyHeading.getBoundingClientRect().bottom) - target.top);
     clipBottom = Math.max(0, target.bottom - panel.bottom);
   }
   const preview = queued && !video.paused && !video.ended && !video.error && video.readyState >= 2 &&
@@ -2063,6 +2091,7 @@ for (const event of ["loadedmetadata", "durationchange", "timeupdate", "seeked"]
 for (const event of ["play", "playing", "pause"]) {
   onActiveMedia(event, updatePlayback);
 }
+onActiveMedia("seeked", updatePlayback);
 onActiveMedia("playing", () => {
   if (!current || recordedCurrent) return;
   recordedCurrent = true;

@@ -49,11 +49,15 @@ const trackStore = {
     });
   },
 
-  deleteTrack(database, id) {
+  deleteTracks(database, ids) {
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(["tracks", "trackDetails"], "readwrite");
-      transaction.objectStore("tracks").delete(id);
-      transaction.objectStore("trackDetails").delete(id);
+      const tracks = transaction.objectStore("tracks");
+      const details = transaction.objectStore("trackDetails");
+      for (const id of ids) {
+        tracks.delete(id);
+        details.delete(id);
+      }
       transaction.oncomplete = () => resolve();
       transaction.onabort = () => reject(transaction.error);
     });

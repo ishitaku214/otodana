@@ -110,7 +110,7 @@ class PlaybackQueue {
   }
 }
 
-function bindQueueGestures(list, scrollArea, actions, reducedMotion) {
+function bindQueueGestures(list, getScrollArea, actions, reducedMotion) {
   const canSwipe = Boolean(actions.remove);
   let drag = null;
   let revealed = null;
@@ -143,7 +143,7 @@ function bindQueueGestures(list, scrollArea, actions, reducedMotion) {
   }
 
   function paintReorder(event) {
-    const { row } = drag;
+    const { row, scrollArea } = drag;
     const offset = event.clientY - drag.y + scrollArea.scrollTop - drag.scroll;
     actions.previewDrop?.(event);
     drag.target = Math.max(0, Math.min(drag.rows.length - 1, drag.index + Math.round(offset / drag.height)));
@@ -159,6 +159,7 @@ function bindQueueGestures(list, scrollArea, actions, reducedMotion) {
   function scrollWhileDragging() {
     scrollFrame = 0;
     if (drag?.mode !== "reorder") return;
+    const { scrollArea } = drag;
     const before = scrollArea.scrollTop;
     scrollArea.scrollTop += actions.scrollDrag(drag.pointer);
     if (scrollArea.scrollTop === before) return;
@@ -191,10 +192,11 @@ function bindQueueGestures(list, scrollArea, actions, reducedMotion) {
     if (revealed && revealed !== row) reveal(null);
     const rows = Array.from(list.children);
     const index = rows.indexOf(row);
+    const scrollArea = getScrollArea();
     drag = {
       id: event.pointerId, x: event.clientX, y: event.clientY,
       row, rows, index, target: index, handle, mode: "",
-      height: row.offsetHeight, scroll: scrollArea.scrollTop,
+      height: row.offsetHeight, scrollArea, scroll: scrollArea.scrollTop,
     };
   });
 
