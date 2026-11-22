@@ -4,13 +4,27 @@ class PlaybackQueue {
   upcoming = [];
   previous = [];
   history = [];
+  scope = [];
   shuffled = false;
+  repeat = false;
 
   start(tracks, track) {
+    this.scope = tracks.slice();
     const index = tracks.indexOf(track);
     this.previous = tracks.slice(0, index);
     this.upcoming = tracks.slice(index + 1);
     if (this.shuffled) this.shuffleUpcoming();
+  }
+
+  updateScope(tracks) {
+    this.scope = tracks.slice();
+    const available = new Set(tracks);
+    this.upcoming = this.upcoming.filter((track) => available.has(track));
+    this.previous = this.previous.filter((track) => available.has(track));
+  }
+
+  get hasNext() {
+    return this.upcoming.length > 0 || (this.repeat && this.scope.length > 0);
   }
 
   shuffleUpcoming() {
@@ -20,28 +34,41 @@ class PlaybackQueue {
     }
   }
 
-  toggleShuffle(tracks) {
+  toggleShuffle() {
     this.shuffled = !this.shuffled;
     if (this.shuffled) {
       this.shuffleUpcoming();
     } else {
-      const originalOrder = new Map(tracks.map((track, index) => [track, index]));
+      const originalOrder = new Map(this.scope.map((track, index) => [track, index]));
       this.upcoming.sort((first, second) => originalOrder.get(first) - originalOrder.get(second));
     }
   }
 
   append(added) {
+    this.scope.push(...added);
     for (const track of added) {
       const index = this.shuffled ? Math.floor(Math.random() * (this.upcoming.length + 1)) : this.upcoming.length;
       this.upcoming.splice(index, 0, track);
     }
   }
 
-  forward(current, track = this.upcoming[0]) {
+  forward(current, track) {
+    if (!track && !this.upcoming.length && this.repeat) {
+      this.upcoming = this.scope.slice();
+      if (this.shuffled) {
+        this.shuffleUpcoming();
+        if (this.upcoming.length > 1 && this.upcoming[0] === current) {
+          const other = 1 + Math.floor(Math.random() * (this.upcoming.length - 1));
+          [this.upcoming[0], this.upcoming[other]] = [this.upcoming[other], this.upcoming[0]];
+        }
+      }
+    }
+    track ??= this.upcoming[0];
     const index = this.upcoming.indexOf(track);
     if (index < 0) return null;
     this.upcoming.splice(0, index + 1);
     this.previous.push(current);
+    if (this.previous.length > Math.max(100, this.scope.length)) this.previous.shift();
     return track;
   }
 
@@ -71,7 +98,9 @@ class PlaybackQueue {
 
   remove(track, wasPlaying) {
     this.history = this.history.filter((entry) => entry !== track);
+    this.scope = this.scope.filter((entry) => entry !== track);
     if (wasPlaying) {
+      this.scope = [];
       this.upcoming = [];
       this.previous = [];
     } else {

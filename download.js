@@ -38,7 +38,7 @@ async function receiveMedia(response, onProgress) {
   const mime = response.headers.get("Content-Type") ?? "";
   if (!/^(audio\/mpeg|video\/mp4)(?:;|$)/i.test(mime)) rejectResponse("取得サーバーの応答が動画・音声ファイルではありません。");
   const total = Number(response.headers.get("Content-Length"));
-  const tooLarge = "128MBを超えています。「ファイルを追加」から保存済みファイルを取り込めます。";
+  const tooLarge = "128MBを超えています。ライブラリの「♪」から「端末のファイルを選ぶ」を押すと、保存済みファイルを取り込めます。";
   if (total > downloadLimit) rejectResponse(tooLarge);
   if (!response.body) throw new Error("ファイルを受信できませんでした。");
   const reader = response.body.getReader();
@@ -305,6 +305,7 @@ function setupMediaDownloads(saveMedia) {
 
   find("download-open").addEventListener("click", () => {
     if (dialog.open) return;
+    find("add-dialog").close();
     dialog.showModal();
   });
   close.addEventListener("click", () => {

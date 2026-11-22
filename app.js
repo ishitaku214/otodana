@@ -8,6 +8,7 @@ const videoFullscreen = get("video-fullscreen");
 const videoSkip = get("video-skip");
 const videoSlot = get("artwork-stage").querySelector(".cover-space");
 const videoControls = document.querySelector(".player-controls");
+const playerContent = document.querySelector(".player-content");
 const fullscreenRoot = document.documentElement;
 const playerCover = get("player-cover");
 let media = audio;
@@ -19,6 +20,8 @@ const mediaFormats = {
   webm: "video/webm",
 };
 const picker = get("file-picker");
+const addTracks = get("add-tracks");
+const addDialog = get("add-dialog");
 const list = get("tracks");
 const search = get("search");
 const seek = get("seek");
@@ -31,10 +34,19 @@ const queuePanel = get("queue-panel");
 const queueCurrent = get("queue-current");
 const queueList = get("queue-list");
 const shuffleToggle = get("shuffle-toggle");
+const repeatToggle = get("repeat-toggle");
 const queueArtwork = get("queue-artwork");
 const queueVideoSlot = queueArtwork.parentElement;
 const artwork = get("artwork");
 const miniArtwork = get("mini-artwork");
+const miniVideo = get("mini-video");
+const libraryVideo = document.createElement("canvas");
+libraryVideo.className = "thumb-video";
+libraryVideo.width = libraryVideo.height = 128;
+libraryVideo.hidden = true;
+const waveform = document.createElement("span");
+waveform.className = "track-waveform";
+waveform.innerHTML = "<i></i>".repeat(6);
 const menu = get("track-menu");
 const deleteMode = get("delete-mode");
 const deleteDialog = get("delete-dialog");
@@ -56,6 +68,7 @@ const tracks = [];
 const folders = [];
 let activeFolder = null;
 let playbackFolder = null;
+let playbackQuery = "";
 let menuFolder = null;
 let folderSelection = null;
 let customTrackOrder = false;
@@ -80,6 +93,10 @@ let backdrop = null;
 let importQueue = Promise.resolve();
 let saveToastTimer;
 let videoLayoutFrame = 0;
+let libraryPreviewFrame = 0;
+let lastLibraryPreview = 0;
+let activeLibraryButton = null;
+let seekDrag = null;
 let fullscreenControlsTimer;
 let videoSkipTimer;
 let videoTapTimer;
@@ -98,6 +115,7 @@ function syncLayout() {
   player.inert = mobile.matches && !expanded;
   get("theme-color").content = expanded && !fullscreen ? "#132a22" : "#000000";
   scheduleVideoLayout();
+  updateLibraryPreview();
 }
 
 function showView(view) {
@@ -105,7 +123,7 @@ function showView(view) {
   document.body.dataset.view = view;
   syncLayout();
   if (view === "player") player.scrollTop = 0;
-  const focusTarget = view === "player" ? get("library-tab") : (current ? get("player-tab") : picker);
+  const focusTarget = view === "player" ? get("library-tab") : (current ? get("player-tab") : addTracks);
   focusTarget.focus({ preventScroll: true });
 }
 
@@ -129,7 +147,7 @@ function formatTime(seconds) {
 
 function updateTime() {
   const canSeek = Boolean(current) && !media.error && Number.isFinite(media.duration) && media.duration > 0;
-  const seconds = canSeek ? media.currentTime : 0;
+  const seconds = canSeek ? (seekDrag?.media === media ? seekDrag.time : media.currentTime) : 0;
   const duration = canSeek ? media.duration : 0;
   const progress = duration ? Math.min(100, seconds / duration * 100) : 0;
   document.body.style.setProperty("--progress", progress + "%");
@@ -150,7 +168,50 @@ function updatePlayback() {
     button.setAttribute("aria-label", playing ? "一時停止" : "再生");
   }
   updateVideoTools();
+  activeLibraryButton?.toggleAttribute("data-playing", playing);
+  updateLibraryPreview();
   scheduleVideoLayout();
+}
+
+function libraryPreviewVisible() {
+  const libraryVisible = !mobile.matches || document.body.dataset.view === "library";
+  return libraryVisible && !document.body.hasAttribute("data-video-expanded") && !document.hidden &&
+    media === video && !video.paused && !video.ended && !video.error && video.readyState >= 2;
+}
+
+function drawLibraryPreview(now) {
+  libraryPreviewFrame = 0;
+  if (!libraryPreviewVisible()) return;
+  if (now - lastLibraryPreview >= 40) {
+    lastLibraryPreview = now;
+    const side = Math.min(video.videoWidth, video.videoHeight);
+    if (side > 0) {
+      const miniContext = miniVideo.getContext("2d");
+      if (miniContext) {
+        miniContext.drawImage(video, (video.videoWidth - side) / 2, (video.videoHeight - side) / 2,
+          side, side, 0, 0, miniVideo.width, miniVideo.height);
+        miniVideo.hidden = false;
+        if (libraryVideo.isConnected) {
+          const context = libraryVideo.getContext("2d");
+          if (context) {
+            context.drawImage(miniVideo, 0, 0);
+            libraryVideo.hidden = false;
+          }
+        }
+      }
+    }
+  }
+  libraryPreviewFrame = requestAnimationFrame(drawLibraryPreview);
+}
+
+function updateLibraryPreview() {
+  if (libraryPreviewVisible()) {
+    if (!libraryPreviewFrame) libraryPreviewFrame = requestAnimationFrame(drawLibraryPreview);
+  } else {
+    cancelAnimationFrame(libraryPreviewFrame);
+    libraryPreviewFrame = 0;
+    miniVideo.hidden = libraryVideo.hidden = true;
+  }
 }
 
 function trackTitle(track) {
@@ -210,10 +271,6 @@ function setMarquee(element, value, optional = false) {
   if (element.isConnected) measureMarquee(element);
 }
 
-function disposeMarquees(container) {
-  for (const element of container.querySelectorAll(".marquee")) marqueeObserver?.unobserve(element);
-}
-
 function updateMediaMetadata() {
   if (!mediaSession || typeof MediaMetadata !== "function") return;
   mediaSession.metadata = current ? new MediaMetadata({
@@ -244,7 +301,7 @@ function queueTrackButton(track, action) {
     }
   }
   const title = document.createElement("span");
-  setMarquee(title, trackTitle(track));
+  title.textContent = trackTitle(track);
   button.append(thumbnail, title);
   button.addEventListener("click", action);
   return button;
@@ -273,8 +330,8 @@ function renderQueue(anchor = false) {
   cancelQueueGesture();
   queueThumbnailObserver?.disconnect();
   const scroll = queuePanel.scrollTop;
-  setMarquee(get("queue-now-title"), trackTitle(current));
-  setMarquee(get("queue-now-artist"), trackArtist(current), true);
+  get("queue-now-title").textContent = trackTitle(current);
+  get("queue-now-artist").textContent = trackArtist(current);
   const history = recordedCurrent ? queue.history.slice(0, -1) : queue.history;
   const historyRows = history.map((track) => {
     const row = document.createElement("li");
@@ -284,7 +341,6 @@ function renderQueue(anchor = false) {
     }));
     return row;
   });
-  disposeMarquees(get("history-list"));
   get("history-list").replaceChildren(...historyRows);
   get("history-empty").hidden = history.length > 0;
   const rows = queue.upcoming.map((track) => {
@@ -314,7 +370,6 @@ function renderQueue(anchor = false) {
     row.append(remove, content);
     return row;
   });
-  disposeMarquees(queueList);
   queueList.replaceChildren(...rows);
   get("queue-empty").hidden = Boolean(rows.length);
   if (anchor) {
@@ -433,28 +488,42 @@ function updateSelection() {
   setMarquee(get("mini-title"), title);
   setMarquee(get("mini-artist"), artist, true);
   get("previous").disabled = !current || !queue.previous.length;
-  get("next").disabled = !current || !queue.upcoming.length;
+  get("next").disabled = !current || !queue.hasNext;
   get("mini-next").disabled = get("next").disabled;
   toggle.disabled = !current;
   const currentIsVideo = isVideo(current);
   videoStage.hidden = !currentIsVideo;
+  videoFullscreen.hidden = !currentIsVideo;
   playerCover.hidden = currentIsVideo;
   player.toggleAttribute("data-video", currentIsVideo);
   miniPlayer.hidden = !current;
   queueToggle.hidden = !current;
   shuffleToggle.setAttribute("aria-pressed", String(queue.shuffled));
+  repeatToggle.setAttribute("aria-pressed", String(queue.repeat));
+  repeatToggle.disabled = shuffleToggle.disabled = !current;
   if (player.dataset.queue === "true") {
     if (current) renderQueue();
     else showQueue(false);
   }
   document.body.dataset.hasTrack = String(Boolean(current));
+  activeLibraryButton = null;
   for (const row of list.children) {
     const button = row.querySelector(".track-select");
     const active = row.track === current;
-    if (active === button.hasAttribute("aria-current")) continue;
-    if (active) button.setAttribute("aria-current", "true");
-    else button.removeAttribute("aria-current");
-    measureMarquee(row.querySelector(".track-name"));
+    if (active) {
+      button.setAttribute("aria-current", "true");
+      activeLibraryButton = button;
+    } else {
+      button.removeAttribute("aria-current");
+      button.removeAttribute("data-playing");
+    }
+  }
+  if (activeLibraryButton) {
+    const thumbnail = activeLibraryButton.querySelector(".thumb");
+    if (libraryVideo.parentElement !== thumbnail) thumbnail.append(libraryVideo, waveform);
+  } else {
+    libraryVideo.remove();
+    waveform.remove();
   }
   updatePlayback();
   updateTime();
@@ -517,6 +586,8 @@ function setBackdrop(image) {
 
 function clearSource(nextMedia = audio) {
   ++playRequest;
+  seekDrag = null;
+  miniVideo.hidden = libraryVideo.hidden = true;
   media.pause();
   if (media === video) {
     if (nextMedia !== video) closeVideoExpanded();
@@ -605,12 +676,13 @@ async function showArtwork(track) {
   }
 }
 
-function selectTrack(track, followQueue = false) {
+function selectTrack(track, followQueue = false, scope, query = "") {
   if (!track) return;
   const folder = track.folder ?? null;
-  if (!followQueue && (current !== track || playbackFolder !== folder)) {
+  if (!followQueue) {
     playbackFolder = folder;
-    queue.start(folder?.tracks ?? rootTracks(), track);
+    playbackQuery = query;
+    queue.start(scope ?? folder?.tracks ?? rootTracks(), track);
   }
   if (current !== track) {
     const nextMedia = isVideo(track) ? video : audio;
@@ -621,7 +693,7 @@ function selectTrack(track, followQueue = false) {
     objectUrl = URL.createObjectURL(track.blob);
     media.src = objectUrl;
     showArtwork(track);
-  } else if (media.ended) {
+  } else if (media.ended || followQueue) {
     recordedCurrent = false;
     media.currentTime = 0;
   }
@@ -814,7 +886,7 @@ async function saveDownloadedMedia(blob, filename, format) {
       : "端末に保存できませんでした。音棚を開き直してお試しください。");
   }
   tracks.push(track);
-  if (current && !playbackFolder) queue.append([track]);
+  if (current && !playbackFolder && !playbackQuery) queue.append([track]);
   if (customTrackOrder) persistLibrary();
   search.value = "";
   tellLibrary("");
@@ -897,7 +969,8 @@ function confirmDeletion(track) {
 function setDeleteMode(enabled) {
   deleting = enabled;
   list.toggleAttribute("data-deleting", enabled);
-  deleteMode.textContent = enabled ? "完了" : "編集";
+  deleteMode.setAttribute("aria-pressed", String(enabled));
+  deleteMode.setAttribute("aria-label", enabled ? "編集を完了" : "曲を編集");
   folderExclude.hidden = !enabled || !activeFolder;
   cancelLibraryGesture();
 }
@@ -1137,6 +1210,11 @@ function visibleLibraryTracks() {
   return activeFolder?.tracks ?? rootTracks();
 }
 
+function matchingTracks(entries, query) {
+  return entries.filter((track) => !query || [track.title, trackTitle(track), trackArtist(track), trackAlbum(track)]
+    .some((value) => value && containsQuery(value, query)));
+}
+
 function moveIntoFolder(entries, folder) {
   for (const track of entries) {
     if (track.folder) track.folder.tracks = track.folder.tracks.filter((entry) => entry !== track);
@@ -1144,9 +1222,15 @@ function moveIntoFolder(entries, folder) {
     if (folder) folder.tracks.push(track);
   }
   if (current) {
-    const inPlaybackScope = (track) => (track.folder ?? null) === playbackFolder;
-    queue.upcoming = queue.upcoming.filter(inPlaybackScope);
-    queue.previous = queue.previous.filter(inPlaybackScope);
+    const folder = current.folder ?? null;
+    if (folder !== playbackFolder) {
+      playbackFolder = folder;
+      const scope = matchingTracks(folder?.tracks ?? rootTracks(), playbackQuery);
+      queue.start(scope.includes(current) ? scope : [current], current);
+    } else {
+      const available = folder?.tracks ?? rootTracks();
+      queue.updateScope(playbackQuery ? available.filter((track) => queue.scope.includes(track)) : available);
+    }
   }
   return persistLibrary();
 }
@@ -1209,7 +1293,7 @@ function setFolderSelection(folder, removing = false) {
   if (folder) {
     setDeleteMode(false);
     tellLibrary("");
-    get("selection-title").textContent = removing ? "フォルダから曲を除外" : "フォルダへ曲を追加";
+    get("selection-title").textContent = removing ? "フォルダから曲を除外" : "フォルダへ一括追加";
     list.dataset.selecting = removing ? "remove" : "add";
     document.scrollingElement.scrollTop = 0;
   } else {
@@ -1235,8 +1319,7 @@ function renderTracks() {
   deleteMode.hidden = Boolean(folderSelection);
   get("folder-back").hidden = !activeFolder || Boolean(folderSelection);
   get("storage-summary").hidden = Boolean(activeFolder);
-  picker.closest(".import").hidden = Boolean(activeFolder || folderSelection);
-  get("download-open").hidden = Boolean(activeFolder || folderSelection);
+  addTracks.hidden = Boolean(activeFolder || folderSelection);
   list.replaceChildren();
   const query = search.value.trim().normalize("NFKC").toLocaleLowerCase("ja");
   renderFolders(query);
@@ -1244,8 +1327,7 @@ function renderTracks() {
   deleteMode.disabled = !libraryTracks.length;
   selectionConfirm.disabled = !folderSelection?.chosen.size;
   if (deleteMode.disabled && deleting) setDeleteMode(false);
-  const matches = libraryTracks.filter((track) => !query || [track.title, trackTitle(track), trackArtist(track), trackAlbum(track)]
-    .some((value) => value && containsQuery(value, query)));
+  const matches = matchingTracks(libraryTracks, query);
   for (const track of matches) {
     const row = document.createElement("li");
     row.className = "track queue-row";
@@ -1263,7 +1345,7 @@ function renderTracks() {
         updateSelectionRow(row);
         return;
       }
-      selectTrack(track);
+      selectTrack(track, false, matches, query);
       showView("player");
     });
 
@@ -1283,15 +1365,6 @@ function renderTracks() {
     handle.className = "queue-handle library-handle";
     handle.innerHTML = '<span class="queue-symbol" aria-hidden="true"></span>';
     row.append(select);
-    if (track.id !== undefined) {
-      const saved = document.createElement("span");
-      saved.className = "saved";
-      saved.textContent = "↓";
-      saved.setAttribute("role", "img");
-      saved.setAttribute("aria-label", "端末に保存済み");
-      saved.title = "端末に保存済み";
-      row.append(saved);
-    }
     row.append(more, remove, handle);
     updateSelectionRow(row);
     updateTrackRow(row);
@@ -1303,7 +1376,7 @@ function renderTracks() {
   get("empty-title").textContent = searching ? "曲を検索しています…" : query ? "該当する曲がありません" : "曲がありません";
   get("empty-help").textContent = searching ? "" : query
     ? "別の曲名やアーティスト名で探してください。"
-    : activeFolder ? "ライブラリでフォルダの「•••」から曲を追加できます。" : "「ファイルを追加」からiCloud Driveなどの音楽や動画を選べます。";
+    : activeFolder ? "ライブラリでフォルダの「•••」を開き、「フォルダへ一括追加」を選べます。" : "「♪」からiCloud Driveなどの音楽や動画を追加できます。";
   get("track-count").textContent = query ? matches.length + " / " + libraryTracks.length + " 曲" : libraryTracks.length + " 曲";
   updateStorageSummary();
   updateSelection();
@@ -1328,7 +1401,9 @@ async function filterLibrary() {
   }
 }
 
+addTracks.addEventListener("click", () => addDialog.showModal());
 picker.addEventListener("change", () => {
+  addDialog.close();
   const added = [];
   let invalid = 0;
   for (const file of picker.files) {
@@ -1344,7 +1419,7 @@ picker.addEventListener("change", () => {
   picker.value = "";
   if (added.length) {
     tracks.push(...added);
-    if (current && !playbackFolder) queue.append(added);
+    if (current && !playbackFolder && !playbackQuery) queue.append(added);
     search.value = "";
     filterLibrary();
     tellLibrary(added.length + "曲を端末に保存しています…");
@@ -1400,8 +1475,11 @@ const cancelLibraryGesture = bindQueueGestures(list, document.scrollingElement, 
     else neighbor.before(row);
     if (!activeFolder) customTrackOrder = true;
     persistLibrary();
-    if (current && playbackFolder === activeFolder && (current.folder ?? null) === activeFolder && !queue.shuffled) {
-      queue.start(activeFolder?.tracks ?? rootTracks(), current);
+    if (current && playbackFolder === activeFolder) {
+      const available = visibleLibraryTracks();
+      const scope = playbackQuery ? available.filter((entry) => queue.scope.includes(entry)) : available;
+      if (queue.shuffled) queue.updateScope(scope);
+      else queue.start(scope, current);
       updateSelection();
     }
   },
@@ -1450,7 +1528,7 @@ deleteDialog.addEventListener("close", () => {
   if (track && deleteDialog.returnValue === "delete") {
     deleteTrack(track).then(() => {
       if (!document.activeElement || document.activeElement === document.body) {
-        (deleteMode.disabled ? picker : deleteMode).focus({ preventScroll: true });
+        (deleteMode.disabled ? (addTracks.hidden ? get("library-title") : addTracks) : deleteMode).focus({ preventScroll: true });
       }
     });
   }
@@ -1464,10 +1542,13 @@ queueCurrent.addEventListener("click", () => {
   queueToggle.focus({ preventScroll: true });
 });
 shuffleToggle.addEventListener("click", () => {
-  queue.toggleShuffle(playbackFolder?.tracks ?? rootTracks());
+  queue.toggleShuffle();
   updateSelection();
 });
-const playerHeader = get("player-header");
+repeatToggle.addEventListener("click", () => {
+  queue.repeat = !queue.repeat;
+  updateSelection();
+});
 let playerDrag = null;
 let playerDragFrame = 0;
 let clearPlayerMorph = null;
@@ -1542,24 +1623,40 @@ function paintPlayerDrag() {
   document.body.style.setProperty("--library-shade", String(.38 * (1 - distance / height)));
 }
 
-playerHeader.addEventListener("pointerdown", (event) => {
-  if (!mobile.matches || event.button !== 0 || event.target.closest("button") || playerDrag ||
-      player.getBoundingClientRect().top > 2) return;
-  clearPlayerMorph?.();
-  playerDrag = { id: event.pointerId, start: event.clientY, height: player.clientHeight, distance: 0 };
-  playerHeader.setPointerCapture(event.pointerId);
-  player.setAttribute("data-dragging", "");
-  document.body.setAttribute("data-player-dragging", "");
-  paintPlayerDrag();
+player.addEventListener("pointerdown", (event) => {
+  const bounds = player.getBoundingClientRect();
+  if (!mobile.matches || !event.isPrimary || event.button !== 0 || playerDrag ||
+      document.body.hasAttribute("data-video-expanded") || bounds.top > 2 ||
+      event.clientY > bounds.top + bounds.height / 2 || event.target.closest("button, input, .queue-panel")) return;
+  playerDrag = { id: event.pointerId, x: event.clientX, start: event.clientY, height: bounds.height, distance: 0, active: false };
 });
-playerHeader.addEventListener("pointermove", (event) => {
+player.addEventListener("pointermove", (event) => {
   if (event.pointerId !== playerDrag?.id) return;
-  playerDrag.distance = Math.min(playerDrag.height, Math.max(0, event.clientY - playerDrag.start));
+  const distance = event.clientY - playerDrag.start;
+  if (!playerDrag.active) {
+    const sideways = Math.abs(event.clientX - playerDrag.x);
+    if (distance < -8 || (sideways > 8 && sideways > distance)) {
+      playerDrag = null;
+      return;
+    }
+    if (distance < 8) return;
+    clearPlayerMorph?.();
+    playerDrag.active = true;
+    player.setPointerCapture(event.pointerId);
+    if (media === video) clearVideoTaps();
+    player.setAttribute("data-dragging", "");
+    document.body.setAttribute("data-player-dragging", "");
+  }
+  playerDrag.distance = Math.min(playerDrag.height, Math.max(0, distance));
   if (!playerDragFrame) playerDragFrame = requestAnimationFrame(paintPlayerDrag);
 });
 function finishPlayerDrag(event) {
-  if (event.type === "lostpointercapture" && event.target !== playerHeader) return;
+  if (event.type === "lostpointercapture" && event.target !== player) return;
   if (event.pointerId !== playerDrag?.id) return;
+  if (!playerDrag.active) {
+    playerDrag = null;
+    return;
+  }
   const released = event.type === "pointerup";
   if (released) playerDrag.distance = Math.min(playerDrag.height, Math.max(0, event.clientY - playerDrag.start));
   const dismiss = released && playerDrag.distance >= playerDrag.height * .4;
@@ -1576,8 +1673,8 @@ function finishPlayerDrag(event) {
   else player.style.removeProperty("--player-drag");
   if (dismiss) showView("library");
 }
-for (const event of ["pointerup", "pointercancel", "lostpointercapture"]) {
-  playerHeader.addEventListener(event, finishPlayerDrag);
+for (const event of ["pointerup", "pointercancel", "pointerleave", "lostpointercapture"]) {
+  player.addEventListener(event, finishPlayerDrag);
 }
 
 // Older WebKit versions can still zoom on a second tap on the empty panel.
@@ -1732,6 +1829,57 @@ seek.addEventListener("input", () => {
   if (!seek.disabled) media.currentTime = seek.valueAsNumber;
 });
 
+function previewSeek(event) {
+  const drag = seekDrag;
+  const pointer = drag.rotated ? event.clientY : event.clientX;
+  const fraction = Math.max(0, Math.min(1, (pointer - drag.start) / drag.length));
+  drag.time = fraction * media.duration;
+  updateTime();
+  revealFullscreenControls();
+}
+
+seek.addEventListener("pointerdown", (event) => {
+  if (seek.disabled || !event.isPrimary || event.button !== 0) return;
+  const bounds = seek.getBoundingClientRect();
+  const rotated = document.body.hasAttribute("data-video-expanded") && getComputedStyle(playerContent).transform !== "none";
+  const length = (rotated ? bounds.height : bounds.width) - 13;
+  if (length <= 0) return;
+  event.preventDefault();
+  seek.focus({ preventScroll: true });
+  seek.setPointerCapture(event.pointerId);
+  seekDrag = { id: event.pointerId, media, rotated, length, start: (rotated ? bounds.top : bounds.left) + 6.5 };
+  previewSeek(event);
+});
+seek.addEventListener("pointermove", (event) => {
+  if (seekDrag?.id === event.pointerId) previewSeek(event);
+});
+seek.addEventListener("pointerup", (event) => {
+  if (seekDrag?.id !== event.pointerId) return;
+  previewSeek(event);
+  const time = seekDrag.time;
+  seekDrag = null;
+  media.currentTime = time;
+  updateTime();
+});
+for (const type of ["pointercancel", "lostpointercapture"]) {
+  seek.addEventListener(type, (event) => {
+    if (seekDrag?.id !== event.pointerId) return;
+    seekDrag = null;
+    updateTime();
+  });
+}
+
+document.addEventListener("pointerdown", () => fullscreenRoot.removeAttribute("data-keyboard-focus"), true);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Tab") fullscreenRoot.setAttribute("data-keyboard-focus", "");
+}, true);
+document.addEventListener("contextmenu", (event) => {
+  if (event.target.closest("#player, #mini-player, #tracks, #folders") && !event.target.closest("input:not([type=range]), textarea")) {
+    event.preventDefault();
+  }
+});
+document.addEventListener("visibilitychange", updateLibraryPreview);
+
 function scheduleVideoLayout() {
   if (videoLayoutFrame) return;
   videoLayoutFrame = requestAnimationFrame(updateVideoLayout);
@@ -1740,10 +1888,7 @@ function scheduleVideoLayout() {
 function updateVideoLayout() {
   videoLayoutFrame = 0;
   if (videoStage.hidden) return;
-  if (document.body.hasAttribute("data-video-expanded")) {
-    videoStage.style.setProperty("--video-control-space", (videoControls.offsetHeight + 6) + "px");
-    return;
-  }
+  if (document.body.hasAttribute("data-video-expanded")) return;
   const queued = player.dataset.queue === "true";
   const stage = videoStage.parentElement.getBoundingClientRect();
   const target = (queued ? queueVideoSlot : videoSlot).getBoundingClientRect();
@@ -1785,7 +1930,10 @@ function revealFullscreenControls() {
   if (!document.body.hasAttribute("data-video-expanded")) return;
   document.body.setAttribute("data-video-controls", "");
   clearTimeout(fullscreenControlsTimer);
-  fullscreenControlsTimer = setTimeout(hideFullscreenControls, 5000);
+  fullscreenControlsTimer = setTimeout(() => {
+    if (seekDrag) revealFullscreenControls();
+    else hideFullscreenControls();
+  }, 5000);
 }
 
 function setVideoExpanded(expanded) {
@@ -1925,10 +2073,7 @@ onActiveMedia("playing", () => {
 });
 onActiveMedia("ended", () => {
   if (!media.ended || !current) return;
-  if (!move(1)) {
-    updatePlayback();
-    tellPlayer("一覧の最後まで再生しました。");
-  }
+  if (!move(1)) updatePlayback();
 });
 onActiveMedia("error", () => {
   if (!current || !media.error) return;
