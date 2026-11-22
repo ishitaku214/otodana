@@ -348,6 +348,7 @@ h1 { font-size: clamp(35px, 6vw, 51px); line-height: 1.1; letter-spacing: -.06em
   background: #d9eed516; color: #f5faee;
 }
 .queue-current .thumb { width: 46px; }
+#player[data-video] .queue-current .thumb { width: 80px; aspect-ratio: 16 / 9; }
 .queue-current .track-copy { flex: 1; overflow: hidden; }
 #queue-now-title { font-size: 17px; font-weight: 750; }
 #queue-now-artist, #queue-empty, #history-empty { color: #c6dac9; font-size: 13px; }
@@ -498,6 +499,18 @@ h1 { font-size: clamp(35px, 6vw, 51px); line-height: 1.1; letter-spacing: -.06em
   height: min(43vh, 340px);
   margin: 0 calc(-1 * clamp(22px, 4vw, 38px)) 12px;
 }
+#player[data-video] #artwork-stage,
+#player[data-video] .queue-panel { transform: none; }
+#video-stage {
+  position: absolute;
+  left: var(--video-x, 0px);
+  top: var(--video-y, 0px);
+  width: var(--video-w, 0px);
+  height: var(--video-h, 0px);
+  z-index: 1;
+  overflow: hidden;
+  touch-action: manipulation;
+}
 #player-video {
   display: block;
   width: 100%;
@@ -506,6 +519,66 @@ h1 { font-size: clamp(35px, 6vw, 51px); line-height: 1.1; letter-spacing: -.06em
   min-height: 0;
   object-fit: contain;
 }
+#player[data-queue="true"] #video-stage {
+  pointer-events: none;
+  visibility: hidden;
+}
+#player[data-queue="true"] #video-stage[data-queue-preview] {
+  visibility: visible;
+  border-radius: 10px;
+  clip-path: inset(var(--video-clip-top, 0px) 0 var(--video-clip-bottom, 0px) 0);
+}
+#player[data-queue="true"] #video-stage .video-touch-zone,
+#player[data-queue="true"] #video-stage .video-actions,
+#player[data-queue="true"] #video-skip { display: none; }
+#player[data-queue="true"] #player-video { background: #0b110d; }
+.video-touch-zone { position: absolute; inset: 0 50% 0 0; }
+.video-touch-zone[data-seconds="10"] { inset: 0 0 0 50%; }
+.video-actions {
+  position: absolute;
+  right: max(6px, env(safe-area-inset-right));
+  bottom: 6px;
+  display: flex;
+  gap: 4px;
+}
+.video-actions button {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  color: #fff;
+  background: #111a16b8;
+  touch-action: manipulation;
+}
+.video-actions svg {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.video-shrink-icon, body[data-video-expanded] .video-expand-icon { display: none; }
+body[data-video-expanded] .video-shrink-icon { display: block; }
+#video-skip {
+  position: absolute;
+  inset: 0 50% 0 0;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(ellipse, #121d17a6, #121d1700 70%);
+  color: #fff;
+  font-size: clamp(15px, 4vw, 22px);
+  font-weight: 700;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease;
+}
+#video-skip[data-direction="next"] { inset: 0 0 0 50%; }
+#video-skip[data-direction] { opacity: 1; }
 .cover img, .mini-player img { animation: artwork-in 260ms var(--ease-out) both; }
 @keyframes artwork-in {
   from { opacity: 0; transform: scale(.984); }
@@ -586,15 +659,6 @@ h1 { font-size: clamp(35px, 6vw, 51px); line-height: 1.1; letter-spacing: -.06em
 .next::after, .previous::after { top: 2px; bottom: 2px; right: 2px; width: 3px; background: currentColor; border-radius: 1px; }
 .previous { transform: scaleX(-1); }
 .player-foot { display: flex; min-height: 44px; align-items: center; justify-content: flex-end; color: #cce0cd; font-size: 12px; }
-#video-fullscreen {
-  min-height: 44px;
-  margin-inline-end: auto;
-  padding: 0 11px;
-  border: 1px solid #526955;
-  border-radius: 10px;
-  background: #22382d;
-  color: var(--accent);
-}
 body[data-video-expanded] { overflow: hidden; }
 body[data-video-expanded] #player {
   position: fixed;
@@ -613,20 +677,29 @@ body[data-video-expanded] .player-header,
 body[data-video-expanded] .playing-details,
 body[data-video-expanded] .player-tools,
 body[data-video-expanded] .player-feedback { visibility: hidden; }
-body[data-video-expanded] #player-video { position: fixed; inset: 0; z-index: 1; background: #050807; }
+body[data-video-expanded] .player-stage { position: static; }
+body[data-video-expanded] #video-stage {
+  inset: 0;
+  width: auto;
+  height: auto;
+  background: #000;
+}
 body[data-video-expanded] .player-controls {
-  position: fixed;
+  position: absolute;
   inset: auto 0 0;
   z-index: 2;
   padding: 8px max(20px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom))
     max(20px, env(safe-area-inset-left));
   background: linear-gradient(transparent, #050807d9);
 }
-body[data-video-expanded] #video-fullscreen {
-  position: fixed;
-  top: max(12px, env(safe-area-inset-top));
-  right: max(12px, env(safe-area-inset-right));
-  z-index: 2;
+body[data-video-expanded] .video-actions { bottom: var(--video-control-space, 100px); }
+body[data-video-expanded] .video-actions,
+body[data-video-expanded] .player-controls { transition: opacity 180ms ease, visibility 180ms; }
+body[data-video-expanded]:not([data-video-controls]) .video-actions,
+body[data-video-expanded]:not([data-video-controls]) .player-controls {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
 }
 .player-tools { display: flex; gap: 8px; }
 .player-actions { display: grid; place-items: center; background: #ecfbd015; }
@@ -902,6 +975,26 @@ body[data-video-expanded] #video-fullscreen {
   #mini-artist { color: #d0decf; font-size: 11px; }
   .mini-progress { position: absolute; bottom: 0; left: 0; height: 3px; width: var(--progress); background: #b5d49e; }
   #track-menu { margin: auto auto max(11px, env(safe-area-inset-bottom)); }
+}
+@media (max-width: 730px) and (orientation: portrait) {
+  body[data-video-expanded] #player[data-video] {
+    inset: 0 auto auto 100vw;
+    width: 100vh;
+    width: 100dvh;
+    height: 100vw;
+    height: 100dvw;
+    transform: rotate(90deg);
+    transform-origin: top left;
+    transition: none;
+    overflow: hidden;
+  }
+  body[data-video-expanded] .video-actions {
+    right: max(6px, env(safe-area-inset-bottom));
+  }
+  body[data-video-expanded] .player-controls {
+    padding-right: max(20px, env(safe-area-inset-bottom));
+    padding-left: max(20px, env(safe-area-inset-top));
+  }
 }
 @media (hover: hover) {
   .import:hover, #track-menu > .save:hover { background: #293a30; }

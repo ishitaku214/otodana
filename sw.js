@@ -2,10 +2,10 @@
 
 const scope = self.registration.scope;
 const cachePrefix = `otodana:${scope}:`;
-const cacheName = `${cachePrefix}v18`;
+const cacheName = `${cachePrefix}v19`;
 const index = new URL("index.html", scope).href;
 const assets = [
-  "index.html", "style.css?v=18", "app.js?v=18", "queue.js?v=11", "storage.js?v=12", "artwork.js?v=4", "manifest.webmanifest",
+  "index.html", "style.css?v=19", "app.js?v=19", "queue.js?v=11", "storage.js?v=12", "artwork.js?v=4", "manifest.webmanifest",
   "download.js?v=18", "download-worker.js?v=16",
   "icon-192.png", "icon-512.png",
 ].map((path) => new URL(path, scope).href);

@@ -9,12 +9,12 @@
   <link rel="icon" href="icon-192.png">
   <link rel="apple-touch-icon" href="icon-192.png">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="style.css?v=18">
+  <link rel="stylesheet" href="style.css?v=19">
   <script src="storage.js?v=12" defer></script>
   <script src="artwork.js?v=4" defer></script>
   <script src="queue.js?v=11" defer></script>
   <script src="download.js?v=18" defer></script>
-  <script src="app.js?v=18" defer></script>
+  <script src="app.js?v=19" defer></script>
 </head>
 <body data-view="library">
   <main class="layout">
@@ -76,7 +76,6 @@
                 <div class="cover-pattern" aria-hidden="true"><span>♫</span></div>
                 <img id="artwork" alt="" hidden>
               </div>
-              <video id="player-video" playsinline preload="metadata" aria-label="動画" hidden></video>
             </div>
             <div class="playing-details">
               <p id="now-playing" class="song-title" aria-live="polite">曲を選んでください</p>
@@ -100,6 +99,21 @@
               <p id="queue-empty">次の曲はありません。</p>
             </div>
           </section>
+          <div id="video-stage" hidden>
+            <video id="player-video" playsinline preload="metadata" aria-label="動画"></video>
+            <div class="video-touch-zone" data-seconds="-10" aria-hidden="true"></div>
+            <div class="video-touch-zone" data-seconds="10" aria-hidden="true"></div>
+            <div id="video-skip" role="status"></div>
+            <div class="video-actions">
+              <button id="video-pip" type="button" aria-label="ピクチャ・イン・ピクチャ" hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11V5H4v14h5m3-5h8v5h-8z"/></svg>
+              </button>
+              <button id="video-fullscreen" type="button" aria-label="動画を全画面" disabled>
+                <svg class="video-expand-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5m6 0h5v5m0 6v5h-5m-6 0H4v-5"/></svg>
+                <svg class="video-shrink-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h5V4m6 0v5h5m0 6h-5v5m-6 0v-5H4"/></svg>
+              </button>
+            </div>
+          </div>
         </div>
         <div class="player-controls">
           <input id="seek" class="range" type="range" aria-label="再生位置" min="0" max="1" step="any" value="0" disabled>
@@ -111,7 +125,6 @@
           </div>
         </div>
         <div class="player-foot">
-          <button id="video-fullscreen" type="button" hidden>動画を全画面</button>
           <div class="player-tools">
             <button type="button" id="shuffle-toggle" class="player-actions shuffle" aria-label="シャッフル" aria-pressed="false"><span aria-hidden="true">⤨</span></button>
             <button type="button" id="queue-toggle" class="player-actions" aria-label="次に再生する曲を表示" aria-controls="queue-panel" aria-pressed="false" hidden><span class="queue-symbol" aria-hidden="true"></span></button>

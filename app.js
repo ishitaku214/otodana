@@ -3,7 +3,13 @@
 const get = (id) => document.getElementById(id);
 const audio = get("audio");
 const video = get("player-video");
+const videoStage = get("video-stage");
 const videoFullscreen = get("video-fullscreen");
+const videoPiP = get("video-pip");
+const videoSkip = get("video-skip");
+const videoSlot = get("artwork-stage").querySelector(".cover-space");
+const videoControls = document.querySelector(".player-controls");
+const fullscreenRoot = document.documentElement;
 const playerCover = get("player-cover");
 let media = audio;
 const mediaFormats = {
@@ -27,6 +33,7 @@ const queueCurrent = get("queue-current");
 const queueList = get("queue-list");
 const shuffleToggle = get("shuffle-toggle");
 const queueArtwork = get("queue-artwork");
+const queueVideoSlot = queueArtwork.parentElement;
 const artwork = get("artwork");
 const miniArtwork = get("mini-artwork");
 const menu = get("track-menu");
@@ -73,6 +80,12 @@ let recordedCurrent = false;
 let backdrop = null;
 let importQueue = Promise.resolve();
 let saveToastTimer;
+let videoLayoutFrame = 0;
+let fullscreenControlsTimer;
+let videoSkipTimer;
+let videoPointer;
+let previousVideoTap;
+let landscapeLocked = false;
 const marqueeRows = new WeakMap();
 const marqueeObserver = typeof ResizeObserver === "function"
   ? new ResizeObserver((entries) => entries.forEach(({ target }) => measureMarquee(target))) : null;
@@ -84,6 +97,7 @@ function syncLayout() {
   miniPlayer.inert = expanded;
   player.inert = mobile.matches && !expanded;
   get("theme-color").content = expanded ? "#132a22" : "#000000";
+  scheduleVideoLayout();
 }
 
 function showView(view) {
@@ -135,6 +149,8 @@ function updatePlayback() {
     button.firstElementChild.dataset.playing = String(playing);
     button.setAttribute("aria-label", playing ? "一時停止" : "再生");
   }
+  updateVideoTools();
+  scheduleVideoLayout();
 }
 
 function trackTitle(track) {
@@ -215,11 +231,17 @@ function queueTrackButton(track, action) {
   const thumbnail = document.createElement("span");
   thumbnail.className = "thumb";
   thumbnail.setAttribute("aria-hidden", "true");
-  if (track.thumbnail) {
+  if (track.thumbnail || isVideo(track)) {
     const image = document.createElement("img");
     image.alt = "";
-    image.src = track.thumbnail;
+    image.hidden = !track.thumbnail;
+    if (track.thumbnail) image.src = track.thumbnail;
     thumbnail.append(image);
+    if (!track.thumbnail) {
+      thumbnail.track = track;
+      if (queueThumbnailObserver) queueThumbnailObserver.observe(thumbnail);
+      else showQueueThumbnail(thumbnail);
+    }
   }
   const title = document.createElement("span");
   setMarquee(title, trackTitle(track));
@@ -228,8 +250,28 @@ function queueTrackButton(track, action) {
   return button;
 }
 
+async function showQueueThumbnail(thumbnail) {
+  const track = thumbnail.track;
+  track.preview ??= loadTrackPreview(track);
+  await track.preview;
+  if (thumbnail.isConnected && track.thumbnail) {
+    const image = thumbnail.firstElementChild;
+    image.src = track.thumbnail;
+    image.hidden = false;
+  }
+}
+
+const queueThumbnailObserver = "IntersectionObserver" in window ? new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    queueThumbnailObserver.unobserve(entry.target);
+    showQueueThumbnail(entry.target);
+  }
+}, { root: queuePanel, rootMargin: "64px" }) : null;
+
 function renderQueue(anchor = false) {
   cancelQueueGesture();
+  queueThumbnailObserver?.disconnect();
   const scroll = queuePanel.scrollTop;
   setMarquee(get("queue-now-title"), trackTitle(current));
   setMarquee(get("queue-now-artist"), trackArtist(current), true);
@@ -285,6 +327,7 @@ function renderQueue(anchor = false) {
 
 function updateHistoryHeading() {
   queuePanel.dataset.history = String(queuePanel.scrollTop < queueCurrent.offsetTop - 2);
+  if (player.dataset.queue === "true") scheduleVideoLayout();
 }
 
 function scrollSide(position) {
@@ -374,7 +417,11 @@ function showQueue(visible) {
   get("artwork-stage").inert = visible;
   queuePanel.inert = !visible;
   if (visible) renderQueue(true);
-  else cancelQueueGesture();
+  else {
+    cancelQueueGesture();
+    queueThumbnailObserver?.disconnect();
+  }
+  scheduleVideoLayout();
 }
 
 function updateSelection() {
@@ -389,11 +436,10 @@ function updateSelection() {
   get("next").disabled = !current || !queue.upcoming.length;
   get("mini-next").disabled = get("next").disabled;
   toggle.disabled = !current;
-  video.hidden = !isVideo(current);
-  playerCover.hidden = !video.hidden;
-  player.toggleAttribute("data-video", !video.hidden);
-  videoFullscreen.hidden = video.hidden;
-  videoFullscreen.disabled = !video.videoWidth;
+  const currentIsVideo = isVideo(current);
+  videoStage.hidden = !currentIsVideo;
+  playerCover.hidden = currentIsVideo;
+  player.toggleAttribute("data-video", currentIsVideo);
   miniPlayer.hidden = !current;
   queueToggle.hidden = !current;
   shuffleToggle.setAttribute("aria-pressed", String(queue.shuffled));
@@ -472,7 +518,10 @@ function setBackdrop(image) {
 function clearSource(nextMedia = audio) {
   ++playRequest;
   media.pause();
-  if (media === video && nextMedia !== video) closeVideoExpanded();
+  if (media === video) {
+    if (nextMedia !== video) closeVideoExpanded();
+    clearVideoTaps();
+  }
   media.removeAttribute("src");
   media.load();
   if (objectUrl) URL.revokeObjectURL(objectUrl);
@@ -524,7 +573,8 @@ async function showArtwork(track) {
     const metadata = await readMediaMetadata(track);
     if (request !== artworkRequest) return;
     updateTrackMetadata(track, metadata);
-    const cover = track.edits?.cover ?? metadata.artwork;
+    const cover = track.edits?.cover ?? (isVideo(track) ? await getVideoThumbnail(track) : metadata.artwork);
+    if (request !== artworkRequest) return;
     if (!cover) {
       setBackdrop(null);
       return;
@@ -1029,17 +1079,19 @@ async function loadTrackPreview(track) {
   }
 }
 
-async function getVideoThumbnail(track) {
+function getVideoThumbnail(track) {
   if (track.videoThumbnail) return track.videoThumbnail;
-  const thumbnail = await readVideoThumbnail(track.blob);
-  if (!thumbnail || !tracks.includes(track)) return null;
-  track.videoThumbnail = thumbnail;
-  if (track.id !== undefined && track.busy !== "delete" && database) {
-    trackStore.updateDetails(database, track.id, (details) => {
-      details.videoThumbnail = thumbnail;
-    }).catch(() => {});
-  }
-  return thumbnail;
+  track.videoThumbnailRequest ??= readVideoThumbnail(track.blob).then((thumbnail) => {
+    if (!thumbnail || !tracks.includes(track)) return null;
+    track.videoThumbnail = thumbnail;
+    if (track.id !== undefined && track.busy !== "delete" && database) {
+      trackStore.updateDetails(database, track.id, (details) => {
+        details.videoThumbnail = thumbnail;
+      }).catch(() => {});
+    }
+    return thumbnail;
+  }).catch(() => null);
+  return track.videoThumbnailRequest;
 }
 
 function updateTrackRow(row) {
@@ -1680,16 +1732,91 @@ seek.addEventListener("input", () => {
   if (!seek.disabled) media.currentTime = seek.valueAsNumber;
 });
 
+function scheduleVideoLayout() {
+  if (videoLayoutFrame) return;
+  videoLayoutFrame = requestAnimationFrame(updateVideoLayout);
+}
+
+function updateVideoLayout() {
+  videoLayoutFrame = 0;
+  if (videoStage.hidden) return;
+  if (document.body.hasAttribute("data-video-expanded")) {
+    videoStage.style.setProperty("--video-control-space", (videoControls.offsetHeight + 6) + "px");
+    return;
+  }
+  const queued = player.dataset.queue === "true";
+  const stage = videoStage.parentElement.getBoundingClientRect();
+  const target = (queued ? queueVideoSlot : videoSlot).getBoundingClientRect();
+  const panel = queued ? queuePanel.getBoundingClientRect() : null;
+  let clipTop = 0;
+  let clipBottom = 0;
+  if (queued) {
+    const historyTop = queuePanel.dataset.history === "true" ? get("history-title").offsetHeight : 0;
+    clipTop = Math.max(0, panel.top + historyTop - target.top);
+    clipBottom = Math.max(0, target.bottom - panel.bottom);
+  }
+  const preview = queued && !video.paused && !video.ended && !video.error && video.readyState >= 2 &&
+    target.height > clipTop + clipBottom;
+  videoStage.toggleAttribute("data-queue-preview", preview);
+  for (const [key, value] of Object.entries({
+    x: target.left - stage.left, y: target.top - stage.top,
+    w: target.width, h: target.height, "clip-top": clipTop, "clip-bottom": clipBottom,
+  })) {
+    videoStage.style.setProperty("--video-" + key, value + "px");
+  }
+}
+
+if (typeof ResizeObserver === "function") {
+  const videoResize = new ResizeObserver(scheduleVideoLayout);
+  for (const target of [videoStage.parentElement, videoSlot, queueVideoSlot, videoControls]) videoResize.observe(target);
+}
+window.addEventListener("resize", scheduleVideoLayout);
+
+function pictureInPictureActive() {
+  return document.pictureInPictureElement === video || video.webkitPresentationMode === "picture-in-picture";
+}
+
+function supportsWebKitPiP() {
+  return typeof video.webkitSetPresentationMode === "function" &&
+    video.webkitSupportsPresentationMode?.("picture-in-picture");
+}
+
+function updateVideoTools() {
+  const ready = media === video && video.readyState >= 1 && video.videoWidth > 0;
+  videoFullscreen.disabled = !ready;
+  const canOpenPiP = ready && (supportsWebKitPiP() ||
+    (document.pictureInPictureEnabled && typeof video.requestPictureInPicture === "function"));
+  videoPiP.hidden = !canOpenPiP;
+  const pip = pictureInPictureActive();
+  videoPiP.setAttribute("aria-label", pip ? "ピクチャ・イン・ピクチャを閉じる" : "ピクチャ・イン・ピクチャ");
+  videoPiP.setAttribute("aria-pressed", String(pip));
+}
+
+function revealFullscreenControls() {
+  if (!document.body.hasAttribute("data-video-expanded")) return;
+  document.body.setAttribute("data-video-controls", "");
+  clearTimeout(fullscreenControlsTimer);
+  fullscreenControlsTimer = setTimeout(() => document.body.removeAttribute("data-video-controls"), 5000);
+}
+
 function setVideoExpanded(expanded) {
+  clearTimeout(fullscreenControlsTimer);
+  document.body.removeAttribute("data-video-controls");
   document.body.toggleAttribute("data-video-expanded", expanded);
-  videoFullscreen.textContent = expanded ? "全画面を閉じる" : "動画を全画面";
+  videoFullscreen.setAttribute("aria-label", expanded ? "動画を縮小" : "動画を全画面");
+  videoFullscreen.setAttribute("aria-pressed", String(expanded));
+  clearVideoTaps();
+  if (!expanded && landscapeLocked) {
+    screen.orientation?.unlock();
+    landscapeLocked = false;
+  }
   syncLayout();
 }
 
 function closeVideoExpanded() {
   if (!document.body.hasAttribute("data-video-expanded")) return;
   setVideoExpanded(false);
-  if (document.fullscreenElement === player) document.exitFullscreen().catch(() => {});
+  if (document.fullscreenElement === fullscreenRoot) document.exitFullscreen().catch(() => {});
 }
 
 videoFullscreen.addEventListener("click", async () => {
@@ -1700,11 +1827,19 @@ videoFullscreen.addEventListener("click", async () => {
   }
   if (player.dataset.queue === "true") showQueue(false);
   setVideoExpanded(true);
-  if (document.fullscreenEnabled && typeof player.requestFullscreen === "function") {
+  if (!document.fullscreenElement && document.fullscreenEnabled && typeof fullscreenRoot.requestFullscreen === "function") {
     try {
-      await player.requestFullscreen();
-      if (!document.body.hasAttribute("data-video-expanded") && document.fullscreenElement === player) {
+      await fullscreenRoot.requestFullscreen();
+      if (!document.body.hasAttribute("data-video-expanded") && document.fullscreenElement === fullscreenRoot) {
         await document.exitFullscreen();
+      } else if (mobile.matches && document.fullscreenElement === fullscreenRoot && typeof screen.orientation?.lock === "function") {
+        try {
+          await screen.orientation.lock("landscape");
+          if (document.body.hasAttribute("data-video-expanded")) landscapeLocked = true;
+          else screen.orientation.unlock();
+        } catch {
+          // The portrait viewport uses the sideways fullscreen layout.
+        }
       }
     } catch {
       // Keep the app's full-viewport layout if browser fullscreen is unavailable.
@@ -1712,16 +1847,73 @@ videoFullscreen.addEventListener("click", async () => {
   }
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape" || !document.body.hasAttribute("data-video-expanded")) return;
-  closeVideoExpanded();
-  videoFullscreen.focus({ preventScroll: true });
+  if (!document.body.hasAttribute("data-video-expanded")) return;
+  if (event.key === "Escape") {
+    closeVideoExpanded();
+    videoFullscreen.focus({ preventScroll: true });
+  } else if (event.key === "Tab") {
+    revealFullscreenControls();
+  }
 });
-player.addEventListener("fullscreenchange", () => {
-  if (document.fullscreenElement !== player && document.body.hasAttribute("data-video-expanded")) setVideoExpanded(false);
+document.addEventListener("fullscreenchange", () => {
+  if (document.fullscreenElement !== fullscreenRoot && document.body.hasAttribute("data-video-expanded")) setVideoExpanded(false);
 });
-video.addEventListener("loadedmetadata", () => {
-  if (media === video) videoFullscreen.disabled = !video.videoWidth;
+for (const event of ["loadedmetadata", "loadeddata", "emptied", "webkitpresentationmodechanged", "enterpictureinpicture", "leavepictureinpicture"]) {
+  video.addEventListener(event, updateVideoTools);
+}
+videoPiP.addEventListener("click", async () => {
+  if (media !== video || videoPiP.hidden) return;
+  try {
+    const active = pictureInPictureActive();
+    if (supportsWebKitPiP()) video.webkitSetPresentationMode(active ? "inline" : "picture-in-picture");
+    else if (active) await document.exitPictureInPicture();
+    else await video.requestPictureInPicture();
+  } catch {
+    if (document.body.hasAttribute("data-video-expanded")) closeVideoExpanded();
+    tellPlayer("この画面ではピクチャ・イン・ピクチャを開始できません。Safariでお試しください。");
+  }
 });
+
+function clearVideoTaps() {
+  videoPointer = null;
+  previousVideoTap = null;
+  clearTimeout(videoSkipTimer);
+  videoSkip.removeAttribute("data-direction");
+  videoSkip.textContent = "";
+}
+
+videoStage.addEventListener("pointerdown", (event) => {
+  if (!event.isPrimary || event.button !== 0) return;
+  const seconds = Number(event.target.dataset?.seconds);
+  if (seconds) videoPointer = { id: event.pointerId, x: event.clientX, y: event.clientY, seconds };
+  else revealFullscreenControls();
+});
+videoStage.addEventListener("pointercancel", clearVideoTaps);
+videoStage.addEventListener("pointerup", (event) => {
+  const start = videoPointer;
+  videoPointer = null;
+  if (start?.id !== event.pointerId || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 16) return;
+  revealFullscreenControls();
+  const time = performance.now();
+  const previous = previousVideoTap;
+  if (!previous || time - previous.time > 350 || previous.seconds !== start.seconds ||
+      Math.hypot(previous.x - start.x, previous.y - start.y) > 80) {
+    previousVideoTap = { ...start, time };
+    return;
+  }
+  previousVideoTap = null;
+  if (media !== video || !Number.isFinite(video.duration) || !video.duration) return;
+  video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + start.seconds));
+  videoSkip.dataset.direction = start.seconds > 0 ? "next" : "previous";
+  videoSkip.textContent = start.seconds > 0 ? "＋10秒" : "−10秒";
+  clearTimeout(videoSkipTimer);
+  videoSkipTimer = setTimeout(() => {
+    videoSkip.removeAttribute("data-direction");
+    videoSkip.textContent = "";
+  }, 650);
+});
+videoControls.addEventListener("pointerdown", revealFullscreenControls);
+seek.addEventListener("input", revealFullscreenControls);
 
 function onActiveMedia(event, handler) {
   for (const element of [audio, video]) {
