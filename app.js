@@ -5,7 +5,6 @@ const audio = get("audio");
 const video = get("player-video");
 const videoStage = get("video-stage");
 const videoFullscreen = get("video-fullscreen");
-const videoPiP = get("video-pip");
 const videoSkip = get("video-skip");
 const videoSlot = get("artwork-stage").querySelector(".cover-space");
 const videoControls = document.querySelector(".player-controls");
@@ -83,6 +82,7 @@ let saveToastTimer;
 let videoLayoutFrame = 0;
 let fullscreenControlsTimer;
 let videoSkipTimer;
+let videoTapTimer;
 let videoPointer;
 let previousVideoTap;
 let landscapeLocked = false;
@@ -91,12 +91,12 @@ const marqueeObserver = typeof ResizeObserver === "function"
   ? new ResizeObserver((entries) => entries.forEach(({ target }) => measureMarquee(target))) : null;
 
 function syncLayout() {
-  const expanded = document.body.hasAttribute("data-video-expanded") ||
-    (mobile.matches && document.body.dataset.view === "player");
+  const fullscreen = document.body.hasAttribute("data-video-expanded");
+  const expanded = fullscreen || (mobile.matches && document.body.dataset.view === "player");
   get("library").inert = expanded;
   miniPlayer.inert = expanded;
   player.inert = mobile.matches && !expanded;
-  get("theme-color").content = expanded ? "#132a22" : "#000000";
+  get("theme-color").content = expanded && !fullscreen ? "#132a22" : "#000000";
   scheduleVideoLayout();
 }
 
@@ -1772,36 +1772,24 @@ if (typeof ResizeObserver === "function") {
 }
 window.addEventListener("resize", scheduleVideoLayout);
 
-function pictureInPictureActive() {
-  return document.pictureInPictureElement === video || video.webkitPresentationMode === "picture-in-picture";
-}
-
-function supportsWebKitPiP() {
-  return typeof video.webkitSetPresentationMode === "function" &&
-    video.webkitSupportsPresentationMode?.("picture-in-picture");
-}
-
 function updateVideoTools() {
-  const ready = media === video && video.readyState >= 1 && video.videoWidth > 0;
-  videoFullscreen.disabled = !ready;
-  const canOpenPiP = ready && (supportsWebKitPiP() ||
-    (document.pictureInPictureEnabled && typeof video.requestPictureInPicture === "function"));
-  videoPiP.hidden = !canOpenPiP;
-  const pip = pictureInPictureActive();
-  videoPiP.setAttribute("aria-label", pip ? "ピクチャ・イン・ピクチャを閉じる" : "ピクチャ・イン・ピクチャ");
-  videoPiP.setAttribute("aria-pressed", String(pip));
+  videoFullscreen.disabled = media !== video || video.readyState < 1 || !video.videoWidth;
+}
+
+function hideFullscreenControls() {
+  clearTimeout(fullscreenControlsTimer);
+  document.body.removeAttribute("data-video-controls");
 }
 
 function revealFullscreenControls() {
   if (!document.body.hasAttribute("data-video-expanded")) return;
   document.body.setAttribute("data-video-controls", "");
   clearTimeout(fullscreenControlsTimer);
-  fullscreenControlsTimer = setTimeout(() => document.body.removeAttribute("data-video-controls"), 5000);
+  fullscreenControlsTimer = setTimeout(hideFullscreenControls, 5000);
 }
 
 function setVideoExpanded(expanded) {
-  clearTimeout(fullscreenControlsTimer);
-  document.body.removeAttribute("data-video-controls");
+  hideFullscreenControls();
   document.body.toggleAttribute("data-video-expanded", expanded);
   videoFullscreen.setAttribute("aria-label", expanded ? "動画を縮小" : "動画を全画面");
   videoFullscreen.setAttribute("aria-pressed", String(expanded));
@@ -1858,25 +1846,16 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("fullscreenchange", () => {
   if (document.fullscreenElement !== fullscreenRoot && document.body.hasAttribute("data-video-expanded")) setVideoExpanded(false);
 });
-for (const event of ["loadedmetadata", "loadeddata", "emptied", "webkitpresentationmodechanged", "enterpictureinpicture", "leavepictureinpicture"]) {
+for (const event of ["loadedmetadata", "loadeddata", "emptied"]) {
   video.addEventListener(event, updateVideoTools);
 }
-videoPiP.addEventListener("click", async () => {
-  if (media !== video || videoPiP.hidden) return;
-  try {
-    const active = pictureInPictureActive();
-    if (supportsWebKitPiP()) video.webkitSetPresentationMode(active ? "inline" : "picture-in-picture");
-    else if (active) await document.exitPictureInPicture();
-    else await video.requestPictureInPicture();
-  } catch {
-    if (document.body.hasAttribute("data-video-expanded")) closeVideoExpanded();
-    tellPlayer("この画面ではピクチャ・イン・ピクチャを開始できません。Safariでお試しください。");
-  }
-});
+
+const videoDoubleTapTime = 350;
 
 function clearVideoTaps() {
   videoPointer = null;
   previousVideoTap = null;
+  clearTimeout(videoTapTimer);
   clearTimeout(videoSkipTimer);
   videoSkip.removeAttribute("data-direction");
   videoSkip.textContent = "";
@@ -1893,15 +1872,22 @@ videoStage.addEventListener("pointerup", (event) => {
   const start = videoPointer;
   videoPointer = null;
   if (start?.id !== event.pointerId || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 16) return;
-  revealFullscreenControls();
   const time = performance.now();
   const previous = previousVideoTap;
-  if (!previous || time - previous.time > 350 || previous.seconds !== start.seconds ||
+  if (!previous || time - previous.time > videoDoubleTapTime || previous.seconds !== start.seconds ||
       Math.hypot(previous.x - start.x, previous.y - start.y) > 80) {
     previousVideoTap = { ...start, time };
+    if (document.body.hasAttribute("data-video-expanded")) {
+      clearTimeout(videoTapTimer);
+      videoTapTimer = setTimeout(() => {
+        if (document.body.hasAttribute("data-video-controls")) hideFullscreenControls();
+        else revealFullscreenControls();
+      }, videoDoubleTapTime);
+    }
     return;
   }
   previousVideoTap = null;
+  clearTimeout(videoTapTimer);
   if (media !== video || !Number.isFinite(video.duration) || !video.duration) return;
   video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + start.seconds));
   videoSkip.dataset.direction = start.seconds > 0 ? "next" : "previous";

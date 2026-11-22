@@ -68,12 +68,62 @@ async function receiveMedia(response, onProgress) {
   return new Blob(chunks, { type: mime });
 }
 
-function createDownloadRequest(connection, signal) {
+function waitForDownloadRetry(signal) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(finish, 2500);
+    function finish() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    }
+    if (signal.aborted) finish();
+    else signal.addEventListener("abort", finish, { once: true });
+  });
+}
+
+async function waitForRenderServer(origin, signal, showProgress) {
+  const deadline = Date.now() + 120_000;
+  const notice = setTimeout(() => showProgress("取得サーバーを起動中…"), 750);
+  try {
+    while (Date.now() < deadline) {
+      signal.throwIfAborted();
+      const check = new AbortController();
+      const abortCheck = () => check.abort();
+      signal.addEventListener("abort", abortCheck, { once: true });
+      const timeout = setTimeout(abortCheck, Math.min(15_000, deadline - Date.now()));
+      try {
+        const response = await fetch(origin + "/health", {
+          signal: check.signal, credentials: "omit", cache: "no-store", redirect: "error",
+        });
+        if (response.ok && response.headers.get("Content-Type")?.startsWith("application/json")) {
+          if ((await response.json())?.ok === true) return;
+        } else {
+          response.body?.cancel().catch(() => {});
+        }
+      } catch {
+        // Render can return a loading page or a CORS failure while the service starts.
+        signal.throwIfAborted();
+      } finally {
+        clearTimeout(timeout);
+        signal.removeEventListener("abort", abortCheck);
+      }
+      if (Date.now() < deadline) await waitForDownloadRetry(signal);
+    }
+    signal.throwIfAborted();
+    throw new Error("取得サーバーが約2分以内に応答しませんでした。設定したURLやRenderの稼働状況を確認してください。");
+  } finally {
+    clearTimeout(notice);
+  }
+}
+
+async function createDownloadRequest(connection, signal, showProgress) {
   if (!connection.origin || !connection.token) throw new Error("「取得サーバーの設定」を開き、URLと接続キーを保存してください。");
+  const origin = downloadServerOrigin(connection.origin);
+  if (new URL(origin).hostname.endsWith(".onrender.com")) await waitForRenderServer(origin, signal, showProgress);
   return async (path, { method = "GET", body, requestSignal = signal } = {}) => {
     let response;
     try {
-      response = await fetch(downloadServerOrigin(connection.origin) + path, {
+      response = await fetch(origin + path, {
         method, body: body ? JSON.stringify(body) : undefined, signal: requestSignal,
         headers: { Authorization: "Bearer " + connection.token, ...(body && { "Content-Type": "application/json" }) },
         credentials: "omit", cache: "no-store", redirect: "error",
@@ -336,7 +386,7 @@ function setupMediaDownloads(saveMedia) {
         const url = approvedUrl ?? urlField.value.trim();
         if (!url) throw new Error("YouTubeまたはニコニコ動画の共有リンクを入力してください。");
         if (!connection.origin || !connection.token) config.open = true;
-        const request = createDownloadRequest(connection, signal);
+        const request = await createDownloadRequest(connection, signal, showProgress);
         if (!approvedUrl) {
           showProgress("動画の容量を確認しています…");
           const response = await request("/api/downloads/estimate", { method: "POST", body: { url, format } });
