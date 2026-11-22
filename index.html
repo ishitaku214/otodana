@@ -9,12 +9,12 @@
   <link rel="icon" href="icon-192.png">
   <link rel="apple-touch-icon" href="icon-192.png">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="style.css?v=16">
+  <link rel="stylesheet" href="style.css?v=18">
   <script src="storage.js?v=12" defer></script>
-  <script src="artwork.js?v=3" defer></script>
+  <script src="artwork.js?v=4" defer></script>
   <script src="queue.js?v=11" defer></script>
-  <script src="download.js?v=16" defer></script>
-  <script src="app.js?v=16" defer></script>
+  <script src="download.js?v=18" defer></script>
+  <script src="app.js?v=18" defer></script>
 </head>
 <body data-view="library">
   <main class="layout">
@@ -28,7 +28,7 @@
               <span class="plus" aria-hidden="true"></span> ファイルを追加
               <input id="file-picker" type="file" accept=".mp3,.mp4,.m4v,.mov,.webm,audio/mpeg,video/mp4,video/quicktime,video/webm" multiple aria-label="音楽・動画を追加">
             </label>
-            <button type="button" id="download-open">ブラウザからDL</button>
+            <button type="button" id="download-open">動画リンクから保存</button>
             <button type="button" id="delete-mode" disabled>編集</button>
           </div>
         </div>
@@ -137,17 +137,12 @@
 
   <dialog id="download-dialog" class="folder-dialog" aria-labelledby="download-title">
     <div class="menu-heading">
-      <h2 id="download-title">ブラウザからDL</h2>
+      <h2 id="download-title">動画リンクから保存</h2>
       <button type="button" id="download-close" aria-label="閉じる" autofocus>×</button>
     </div>
-    <p class="feedback download-help">配布元が用意したファイルのURLを貼り付けるか、端末に保存したファイルを選びます。</p>
-    <div class="download-sites">
-      <a href="https://www.youtube.com/" target="_blank" rel="noopener noreferrer">YouTubeを開く</a>
-      <a href="https://studio.youtube.com/" target="_blank" rel="noopener noreferrer">YouTube Studio</a>
-    </div>
-    <label for="download-url">ファイルのURL</label>
+    <p class="feedback">YouTubeやニコニコ動画で「共有」からリンクをコピーしてください。</p>
+    <label for="download-url">動画の共有リンク</label>
     <input id="download-url" type="url" inputmode="url" placeholder="https://" autocapitalize="off" autocomplete="off" spellcheck="false">
-    <a id="download-open-source" target="_blank" rel="noopener noreferrer" hidden>入力したURLをブラウザで開く</a>
     <div class="download-file-row">
       <label class="import">端末のファイルを選ぶ
         <input id="download-file" type="file" accept="audio/*,video/*,.mp3,.mp4,.m4a,.m4v,.mov,.webm,.mkv,.wav,.ogg,.flac" aria-label="端末のファイルを選ぶ">
@@ -159,6 +154,29 @@
       <button type="button" value="mp4">MP4で保存</button>
       <button type="button" value="mp3">MP3で保存</button>
     </div>
+    <section id="download-estimate" aria-labelledby="download-estimate-title" hidden>
+      <h3 id="download-estimate-title"></h3>
+      <dl>
+        <dt>配信元から取得する合計</dt>
+        <dd id="download-estimate-source"></dd>
+        <dt>端末に保存する容量</dt>
+        <dd id="download-estimate-output"></dd>
+      </dl>
+      <div class="dialog-actions">
+        <button type="button" id="download-estimate-back">戻る</button>
+        <button type="button" id="download-confirm">保存を開始</button>
+      </div>
+    </section>
+    <details id="download-config" class="download-config">
+      <summary>取得サーバーの設定</summary>
+      <div>
+        <label for="download-server">取得サーバーのURL</label>
+        <input id="download-server" type="url" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false">
+        <label for="download-token">接続キー</label>
+        <input id="download-token" type="password" autocomplete="off">
+        <button type="button" id="download-config-save">接続先を保存</button>
+      </div>
+    </details>
     <progress id="download-progress" max="100" aria-label="保存の進み具合" hidden></progress>
     <p id="download-message" class="feedback" role="status"></p>
     <button type="button" id="download-cancel" hidden>中止</button>

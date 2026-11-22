@@ -1,60 +1,42 @@
 "use strict";
 
 const downloadLimit = 128_000_000;
-const youTubeHome = "https://www.youtube.com/";
-const youtubeDownloadHelp = "YouTubeの視聴URLからは取得できません。自分の動画はYouTube Studioから保存し、端末のファイルを選んでください。";
+const downloadConnectionKey = "otodana-download-connection";
 
-function isYouTubeUrl(url) {
-  return /(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com|googlevideo\.com)$/i.test(url.hostname);
-}
-
-function parseDownloadUrl(value) {
-  let url;
+function readDownloadConnection() {
   try {
-    url = new URL(value.trim());
+    return JSON.parse(localStorage.getItem(downloadConnectionKey)) ?? {};
   } catch {
-    throw new Error("ファイルのURLを入力してください。");
+    return {};
   }
-  const local = url.origin === location.origin && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
-  if (url.username || url.password || (url.protocol !== "https:" && !(local && url.protocol === "http:"))) {
-    throw new Error("配布元のHTTPSで始まるファイルURLを使ってください。");
-  }
-  return url;
 }
 
-function suppliedFilename(url, response) {
-  const header = response.headers.get("Content-Disposition") ?? "";
-  const encoded = header.match(/filename\*=UTF-8'[^']*'([^;]+)/i)?.[1];
-  const literal = header.match(/filename\s*=\s*(?:"([^"]+)"|([^;]+))/i);
-  const name = encoded ?? literal?.[1] ?? literal?.[2] ?? url.pathname.split("/").pop();
+function downloadServerOrigin(value) {
+  let server;
   try {
-    return decodeURIComponent(name || "");
+    server = new URL(value.trim());
   } catch {
-    return name;
+    throw new Error("取得サーバーのURLを入力してください。");
   }
+  const loopback = ["127.0.0.1", "localhost", "[::1]"];
+  const local = loopback.includes(server.hostname) && loopback.includes(location.hostname);
+  if (server.username || server.password || server.pathname !== "/" || server.search || server.hash ||
+      (server.protocol !== "https:" && !(local && server.protocol === "http:"))) {
+    throw new Error("取得サーバーのHTTPSアドレスを入力してください。");
+  }
+  return server.origin;
 }
 
-async function receiveMedia(url, signal, onProgress) {
-  let response;
-  try {
-    response = await fetch(url, { signal, credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store" });
-  } catch (error) {
-    if (signal.aborted) throw error;
-    throw new Error("直接取得できませんでした。ブラウザで配布元のファイルを保存し、「端末のファイルを選ぶ」から取り込めます。");
-  }
+async function receiveMedia(response, onProgress) {
   function rejectResponse(message) {
     response.body?.cancel().catch(() => {});
     throw new Error(message);
   }
-  const sourceUrl = new URL(response.url);
-  if (isYouTubeUrl(sourceUrl)) rejectResponse(youtubeDownloadHelp);
   if (!response.ok || response.status === 206) {
-    rejectResponse("ファイル全体を取得できませんでした。配布元でリンクをご確認ください。");
+    rejectResponse("取得サーバーからファイル全体を受け取れませんでした。");
   }
   const mime = response.headers.get("Content-Type") ?? "";
-  if (/text\/html|application\/xhtml\+xml|mpegurl|dash\+xml/i.test(mime)) {
-    rejectResponse("このURLは視聴ページか配信ページです。配布元のファイルURLを指定してください。");
-  }
+  if (!/^(audio\/mpeg|video\/mp4)(?:;|$)/i.test(mime)) rejectResponse("取得サーバーの応答が動画・音声ファイルではありません。");
   const total = Number(response.headers.get("Content-Length"));
   const tooLarge = "128MBを超えています。「ファイルを追加」から保存済みファイルを取り込めます。";
   if (total > downloadLimit) rejectResponse(tooLarge);
@@ -83,7 +65,76 @@ async function receiveMedia(url, signal, onProgress) {
     if (!done) reader.cancel().catch(() => {});
     reader.releaseLock();
   }
-  return { blob: new Blob(chunks, { type: mime }), name: suppliedFilename(sourceUrl, response) };
+  return new Blob(chunks, { type: mime });
+}
+
+function createDownloadRequest(connection, signal) {
+  if (!connection.origin || !connection.token) throw new Error("「取得サーバーの設定」を開き、URLと接続キーを保存してください。");
+  return async (path, { method = "GET", body, requestSignal = signal } = {}) => {
+    let response;
+    try {
+      response = await fetch(downloadServerOrigin(connection.origin) + path, {
+        method, body: body ? JSON.stringify(body) : undefined, signal: requestSignal,
+        headers: { Authorization: "Bearer " + connection.token, ...(body && { "Content-Type": "application/json" }) },
+        credentials: "omit", cache: "no-store", redirect: "error",
+      });
+    } catch (error) {
+      if (requestSignal.aborted) throw error;
+      throw new Error("取得サーバーに接続できません。設定したURLやサーバーの動作をご確認ください。");
+    }
+    if (!response.ok) {
+      const details = await response.json().catch(() => ({}));
+      throw new Error(typeof details.message === "string" ? details.message : "取得サーバーでエラーが発生しました。");
+    }
+    return response;
+  };
+}
+
+async function downloadVideoPage(url, format, request, signal, showProgress) {
+  showProgress("配信元に接続しています…");
+  const base = "/api/downloads";
+  const created = await request(base, { method: "POST", body: { url, format } });
+  const { id } = await created.json();
+  if (typeof id !== "string" || !/^[a-f\d-]{36}$/.test(id)) throw new Error("取得サーバーの応答を確認できませんでした。");
+  const job = base + "/" + id;
+  try {
+    for (;;) {
+      const status = await (await request(job)).json();
+      if (status.state === "error") throw new Error(status.message || "動画を取得できませんでした。");
+      if (status.state === "ready") {
+        showProgress("端末に転送しています…");
+        const response = await request(job + "/file");
+        const blob = await receiveMedia(response, (loaded, total) => {
+          const percent = total ? Math.min(100, Math.floor(loaded / total * 100)) : undefined;
+          const detail = percent === undefined ? (loaded / 1_000_000).toFixed(1) + " MB" : percent + "%";
+          showProgress("端末に転送中 · " + detail, percent);
+        });
+        return { blob, name: (status.title || "ダウンロード") + "." + format };
+      }
+      if (status.state === "downloading") {
+        const percent = Number.isFinite(status.percent) ? Math.floor(status.percent) : undefined;
+        showProgress(percent === undefined ? "配信元から取得中…" : "配信元から取得中 · " + percent + "%", percent);
+      } else if (status.state === "converting") {
+        showProgress(format.toUpperCase() + "に変換しています…");
+      } else {
+        throw new Error("取得状態を確認できませんでした。");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      signal.throwIfAborted();
+    }
+  } finally {
+    const cleanup = new AbortController();
+    const timeout = setTimeout(() => cleanup.abort(), 8000);
+    try { await request(job, { method: "DELETE", requestSignal: cleanup.signal }); }
+    catch { /* The server also discards expired results. */ }
+    finally { clearTimeout(timeout); }
+  }
+}
+
+function displayDownloadSize(bytes) {
+  const megabytes = bytes >= 1_000_000;
+  const amount = new Intl.NumberFormat("ja", { maximumFractionDigits: 2 }).format(bytes / (megabytes ? 1_000_000 : 1000));
+  return amount + (megabytes ? " MB" : " KB");
 }
 
 async function downloadMediaKind(blob) {
@@ -145,15 +196,24 @@ function setupMediaDownloads(saveMedia) {
   const urlField = find("download-url");
   const fileField = find("download-file");
   const fileName = find("download-file-name");
-  const sourceLink = find("download-open-source");
+  const config = find("download-config");
+  const serverField = find("download-server");
+  const tokenField = find("download-token");
+  const saveConfig = find("download-config-save");
   const menu = find("download-options");
   const showOptions = find("download-formats");
   const progress = find("download-progress");
+  const estimatePanel = find("download-estimate");
+  const confirm = find("download-confirm");
   const message = find("download-message");
   const cancel = find("download-cancel");
   const close = find("download-close");
   const formats = Array.from(menu.querySelectorAll("button"));
+  let connection = readDownloadConnection();
   let job;
+  let checkedDownload;
+  serverField.value = connection.origin || "";
+  tokenField.value = connection.token || "";
 
   function showProgress(text, percent) {
     progress.hidden = false;
@@ -164,11 +224,31 @@ function setupMediaDownloads(saveMedia) {
 
   function clearFeedback() {
     progress.hidden = true;
+    estimatePanel.hidden = true;
+    checkedDownload = null;
     message.textContent = "";
   }
 
+  function showEstimate(estimate, input) {
+    const max = Number.isFinite(estimate.maxSavedBytes) ? estimate.maxSavedBytes : downloadLimit;
+    find("download-estimate-title").textContent = estimate.title;
+    find("download-estimate-source").textContent = Number.isFinite(estimate.sourceBytes)
+      ? (estimate.approximate ? "約 " : "") + displayDownloadSize(estimate.sourceBytes)
+      : "確認できません";
+    find("download-estimate-output").textContent = Number.isFinite(estimate.savedBytes)
+      ? "約 " + displayDownloadSize(estimate.savedBytes) + "（上限 " + displayDownloadSize(max) + "）"
+      : "変換後に確定（上限 " + displayDownloadSize(max) + "）";
+    confirm.textContent = input.format.toUpperCase() + "で保存を開始";
+    clearFeedback();
+    checkedDownload = input;
+    menu.hidden = true;
+    showOptions.setAttribute("aria-expanded", "false");
+    estimatePanel.hidden = false;
+    confirm.focus();
+  }
+
   function toggleRunning(running) {
-    for (const element of [urlField, fileField, showOptions, ...formats]) element.disabled = running;
+    for (const element of [urlField, fileField, showOptions, serverField, tokenField, saveConfig, ...formats]) element.disabled = running;
     cancel.hidden = !running;
     cancel.disabled = close.disabled = false;
   }
@@ -176,7 +256,6 @@ function setupMediaDownloads(saveMedia) {
   find("download-open").addEventListener("click", () => {
     if (dialog.open) return;
     dialog.showModal();
-    window.open(youTubeHome, "_blank", "noopener,noreferrer");
   });
   close.addEventListener("click", () => {
     if (job) job.abort();
@@ -187,34 +266,48 @@ function setupMediaDownloads(saveMedia) {
     else job?.abort();
   });
   cancel.addEventListener("click", () => job?.abort());
-  function refreshSourceLink() {
+  saveConfig.addEventListener("click", () => {
     try {
-      sourceLink.href = parseDownloadUrl(urlField.value).href;
-      sourceLink.hidden = false;
-    } catch {
-      sourceLink.hidden = true;
-      sourceLink.removeAttribute("href");
+      const origin = downloadServerOrigin(serverField.value);
+      const token = tokenField.value.trim();
+      if (token.length < 24) throw new Error("取得サーバーの接続キーを入力してください。");
+      const settings = { origin, token };
+      localStorage.setItem(downloadConnectionKey, JSON.stringify(settings));
+      connection = settings;
+      config.open = false;
+      clearFeedback();
+      message.textContent = "取得サーバーの設定を保存しました。";
+    } catch (error) {
+      message.textContent = error.message;
     }
-  }
+  });
   urlField.addEventListener("input", () => {
     fileField.value = "";
     fileName.textContent = "";
-    refreshSourceLink();
     clearFeedback();
   });
   fileField.addEventListener("change", () => {
     const file = fileField.files[0];
     if (file) urlField.value = "";
     fileName.textContent = file?.name ?? "";
-    refreshSourceLink();
     clearFeedback();
   });
   showOptions.addEventListener("click", () => {
+    if (checkedDownload) clearFeedback();
     menu.hidden = !menu.hidden;
     showOptions.setAttribute("aria-expanded", String(!menu.hidden));
   });
+  find("download-estimate-back").addEventListener("click", () => {
+    clearFeedback();
+    menu.hidden = false;
+    showOptions.setAttribute("aria-expanded", "true");
+    formats[0].focus();
+  });
+  confirm.addEventListener("click", () => {
+    if (checkedDownload) run(checkedDownload.format, checkedDownload.url);
+  });
 
-  async function run(format) {
+  async function run(format, approvedUrl) {
     if (job) return;
     clearFeedback();
     const controller = new AbortController();
@@ -227,27 +320,34 @@ function setupMediaDownloads(saveMedia) {
       }
       const file = fileField.files[0];
       let input;
+      let output;
       if (file) {
         if (!file.size || file.size > downloadLimit) throw new Error("変換するファイルは128MB以下のものを選んでください。");
         input = { blob: file, name: file.name };
+        const kind = await downloadMediaKind(input.blob);
+        output = kind === "mp3" && format === "mp3"
+          ? input.blob.slice(0, input.blob.size, "audio/mpeg")
+          : await convertedMedia(input.blob, format, signal, ({ phase, percent }) => {
+            if (phase === "engine") showProgress("変換機能を読み込んでいます…");
+            else showProgress("端末内で" + format.toUpperCase() + "に変換中…" +
+              (percent === undefined ? "" : " " + percent + "%"), percent);
+          });
       } else {
-        const url = parseDownloadUrl(urlField.value);
-        if (isYouTubeUrl(url)) throw new Error(youtubeDownloadHelp);
-        showProgress("ダウンロードを開始しています…");
-        input = await receiveMedia(url, signal, (loaded, total) => {
-          const bytes = (loaded / 1_000_000).toFixed(1) + " MB";
-          const percent = total ? Math.min(100, Math.floor(loaded / total * 100)) : undefined;
-          showProgress(percent === undefined ? "ダウンロード中 · " + bytes : "ダウンロード中 · " + percent + "%", percent);
-        });
+        const url = approvedUrl ?? urlField.value.trim();
+        if (!url) throw new Error("YouTubeまたはニコニコ動画の共有リンクを入力してください。");
+        if (!connection.origin || !connection.token) config.open = true;
+        const request = createDownloadRequest(connection, signal);
+        if (!approvedUrl) {
+          showProgress("動画の容量を確認しています…");
+          const response = await request("/api/downloads/estimate", { method: "POST", body: { url, format } });
+          const estimate = await response.json();
+          signal.throwIfAborted();
+          showEstimate(estimate, { url, format });
+          return;
+        }
+        input = await downloadVideoPage(url, format, request, signal, showProgress);
+        output = input.blob;
       }
-      const kind = await downloadMediaKind(input.blob);
-      const output = kind === "mp3" && format === "mp3"
-        ? input.blob.slice(0, input.blob.size, "audio/mpeg")
-        : await convertedMedia(input.blob, format, signal, ({ phase, percent }) => {
-          if (phase === "engine") showProgress("変換機能を読み込んでいます…");
-          else showProgress("端末内で" + format.toUpperCase() + "に変換中…" +
-            (percent === undefined ? "" : " " + percent + "%"), percent);
-        });
       if (signal.aborted) throw signal.reason;
       cancel.disabled = close.disabled = true;
       showProgress("ライブラリに保存しています…");
@@ -255,7 +355,6 @@ function setupMediaDownloads(saveMedia) {
       await saveMedia(output, (name.slice(0, 180) || "ダウンロード") + "." + format, format);
       urlField.value = fileField.value = "";
       fileName.textContent = "";
-      refreshSourceLink();
       clearFeedback();
       dialog.close();
     } catch (error) {

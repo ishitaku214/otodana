@@ -672,6 +672,7 @@ async function restoreTracks() {
           track.edits = entry.edits;
           track.plays = entry.plays;
           track.lastPlayed = entry.lastPlayed;
+          track.videoThumbnail = entry.videoThumbnail;
         }
       }
       if (layout) {
@@ -742,9 +743,10 @@ async function saveTrack(track) {
 async function persistTrack(track) {
   const { blob, title, filename, addedAt, format } = track;
   track.id = await trackStore.run(database, "readwrite", (store) => store.add({ blob, title, filename, addedAt, format }));
-  const { edits, plays, lastPlayed } = track;
-  if (edits || plays) trackStore.updateDetails(database, track.id, (details) => {
-    Object.assign(details, { edits, plays, lastPlayed });
+  const { edits, plays, lastPlayed, videoThumbnail } = track;
+  if (edits || plays || videoThumbnail) trackStore.updateDetails(database, track.id, (details) => {
+    if (edits || plays) Object.assign(details, { edits, plays, lastPlayed });
+    if (videoThumbnail) details.videoThumbnail = videoThumbnail;
   }).catch(() => trackFeedback(track, "曲の情報を保存できませんでした。"));
   if (queue.history.includes(track)) saveHistory();
 }
@@ -999,8 +1001,12 @@ async function loadTrackPreview(track) {
   try {
     const metadata = await readMediaMetadata(track);
     updateTrackMetadata(track, metadata);
-    const cover = track.edits?.cover ?? metadata.artwork;
+    const cover = track.edits?.cover ?? (isVideo(track) ? await getVideoThumbnail(track) : metadata.artwork);
     if (!cover || !tracks.includes(track)) return;
+    if (cover === track.videoThumbnail) {
+      track.thumbnail = URL.createObjectURL(cover);
+      return;
+    }
     const image = new Image();
     const url = URL.createObjectURL(cover);
     try {
@@ -1021,6 +1027,19 @@ async function loadTrackPreview(track) {
   } catch {
     // Unreadable metadata does not prevent playback.
   }
+}
+
+async function getVideoThumbnail(track) {
+  if (track.videoThumbnail) return track.videoThumbnail;
+  const thumbnail = await readVideoThumbnail(track.blob);
+  if (!thumbnail || !tracks.includes(track)) return null;
+  track.videoThumbnail = thumbnail;
+  if (track.id !== undefined && track.busy !== "delete" && database) {
+    trackStore.updateDetails(database, track.id, (details) => {
+      details.videoThumbnail = thumbnail;
+    }).catch(() => {});
+  }
+  return thumbnail;
 }
 
 function updateTrackRow(row) {

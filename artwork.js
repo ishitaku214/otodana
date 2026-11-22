@@ -1,5 +1,62 @@
 "use strict";
 
+async function readVideoThumbnail(blob) {
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = "auto";
+  const url = URL.createObjectURL(blob);
+  try {
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    const frame = await new Promise((resolve) => {
+      let settled = false;
+      let sampleTime = 0;
+      function finish(capture) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (!capture || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+          resolve(null);
+          return;
+        }
+        const scale = Math.min(1, 320 / Math.max(video.videoWidth, video.videoHeight));
+        canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+        canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+        try {
+          context.drawImage(video, 0, 0, canvas.width, canvas.height);
+          resolve(canvas);
+        } catch {
+          resolve(null);
+        }
+      }
+      const timer = setTimeout(() => finish(!video.seeking), 5000);
+      video.addEventListener("loadedmetadata", () => {
+        if (Number.isFinite(video.duration) && video.duration > 0.25) {
+          sampleTime = Math.min(2, video.duration / 5);
+          try { video.currentTime = sampleTime; }
+          catch { sampleTime = 0; }
+        }
+      }, { once: true });
+      video.addEventListener("loadeddata", () => {
+        if (!sampleTime || (!video.seeking && video.currentTime >= sampleTime - 0.03)) finish(true);
+      });
+      video.addEventListener("seeked", () => {
+        if (video.readyState >= 2) finish(true);
+      }, { once: true });
+      video.addEventListener("error", () => finish(false), { once: true });
+      video.src = url;
+      video.load();
+    });
+    return frame ? await new Promise((resolve) => frame.toBlob(resolve, "image/jpeg", .82)) : null;
+  } finally {
+    video.removeAttribute("src");
+    video.load();
+    URL.revokeObjectURL(url);
+  }
+}
+
 const MAX_TAG_SIZE = 16 * 1024 * 1024;
 
 function readSize(bytes, offset, length, syncSafe = false) {
