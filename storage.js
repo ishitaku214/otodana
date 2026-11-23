@@ -3,11 +3,12 @@
 const trackStore = {
   async open() {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open("otodana-library", 3);
+      const request = indexedDB.open("otodana-library", 4);
       request.onupgradeneeded = ({ oldVersion }) => {
         if (oldVersion === 0) request.result.createObjectStore("tracks", { keyPath: "id", autoIncrement: true });
         if (oldVersion < 2) request.result.createObjectStore("settings");
-        request.result.createObjectStore("trackDetails", { keyPath: "id" });
+        if (oldVersion < 3) request.result.createObjectStore("trackDetails", { keyPath: "id" });
+        request.transaction.objectStore("tracks").createIndex("pcTransferId", "pcTransferId", { unique: true });
       };
       request.onsuccess = () => {
         const database = request.result;
@@ -15,6 +16,16 @@ const trackStore = {
         resolve(database);
       };
       request.onerror = () => reject(request.error);
+    });
+  },
+
+  addTransfer(database, track, edits) {
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(["tracks", "trackDetails"], "readwrite");
+      const request = transaction.objectStore("tracks").add(track);
+      if (edits) request.onsuccess = () => transaction.objectStore("trackDetails").put({ id: request.result, edits });
+      transaction.oncomplete = () => resolve(request.result);
+      transaction.onabort = () => reject(transaction.error ?? request.error);
     });
   },
 

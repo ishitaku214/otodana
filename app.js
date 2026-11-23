@@ -43,6 +43,8 @@ const queueArtwork = get("queue-artwork");
 const queueVideoSlot = queueArtwork.parentElement;
 const artwork = get("artwork");
 const miniArtwork = get("mini-artwork");
+const miniVideo = get("mini-video");
+const miniVideoContext = miniVideo.getContext("2d");
 const videoPoster = get("video-poster");
 const libraryWaveform = createWaveform();
 queueVideoSlot.append(createWaveform());
@@ -56,6 +58,7 @@ const folderList = get("folders");
 const newFolder = get("new-folder");
 const createFolderDialog = get("folder-create");
 const selectionBar = get("folder-selection");
+const selectionTitle = get("selection-title");
 const selectionConfirm = get("selection-confirm");
 const detailsDialog = get("track-details");
 const detailsSave = get("details-save");
@@ -94,6 +97,8 @@ let backdrop = null;
 let importQueue = Promise.resolve();
 let saveToastTimer;
 let videoLayoutFrame = 0;
+let miniVideoFrame = 0;
+let miniVideoTime = -Infinity;
 let activeLibraryButton = null;
 let seekDrag = null;
 let fullscreenControlsTimer;
@@ -388,6 +393,7 @@ function settleAfterTouch() {
 }
 
 queuePanel.addEventListener("scroll", () => {
+  queuePanel.toggleAttribute("data-scrolled", queuePanel.scrollTop > 1);
   scheduleVideoLayout();
   settleAfterTouch();
 }, { passive: true });
@@ -470,6 +476,7 @@ function updateSelection() {
   videoFullscreen.hidden = !currentIsVideo;
   playerCover.hidden = currentIsVideo;
   player.toggleAttribute("data-video", currentIsVideo);
+  miniPlayer.toggleAttribute("data-video", currentIsVideo);
   miniPlayer.hidden = !current;
   queueToggle.hidden = !current;
   shuffleToggle.setAttribute("aria-pressed", String(queue.shuffled));
@@ -864,13 +871,33 @@ async function saveDownloadedMedia(blob, filename, format) {
       ? "端末の空き容量が足りません。空き容量を増やしてお試しください。"
       : "端末に保存できませんでした。音棚を開き直してお試しください。");
   }
+  addSavedMediaToLibrary(track);
+  showSaveToast(1, format === "mp4" ? "件" : "曲");
+}
+
+function addSavedMediaToLibrary(track) {
   tracks.push(track);
   if (current && !playbackFolder && !playbackQuery) queue.append([track]);
   if (customTrackOrder) persistLibrary();
   search.value = "";
   tellLibrary("");
   filterLibrary();
-  showSaveToast(1, format === "mp4" ? "件" : "曲");
+}
+
+async function savePCTrack({ blob, title, filename, format, pcTransferId, edits }) {
+  await storageReady;
+  if (!database) throw new Error("このブラウザでは端末保存を利用できません。");
+  const entry = { blob, title, filename, format, pcTransferId, addedAt: Date.now() };
+  try {
+    const id = await trackStore.addTransfer(database, entry, edits);
+    addSavedMediaToLibrary({ ...entry, id, edits });
+    return true;
+  } catch (error) {
+    if (error?.name === "ConstraintError") return false;
+    throw new Error(error?.name === "QuotaExceededError"
+      ? "端末の空き容量が足りません。保存済みの項目はライブラリに残っています。"
+      : "端末に保存できませんでした。音棚を開き直してお試しください。");
+  }
 }
 
 async function saveImportedTracks(added, invalid) {
@@ -1293,10 +1320,11 @@ function setTrackSelection(mode, folder = activeFolder) {
   trackSelection = mode ? { folder, mode, chosen: new Set() } : null;
   get("selection-cancel").disabled = false;
   selectionBar.hidden = !mode;
+  selectionTitle.hidden = !mode;
   if (mode) {
     setDeleteMode(false);
     tellLibrary("");
-    get("selection-title").textContent = { add: "フォルダへ一括追加", remove: "フォルダから一括で出す", delete: "一括削除" }[mode];
+    selectionTitle.textContent = { add: "フォルダへ一括追加", remove: "フォルダから一括で出す", delete: "一括削除" }[mode];
     selectionConfirm.textContent = mode === "delete" ? "削除" : "確定";
     list.dataset.selecting = mode;
     libraryScrollArea().scrollTop = 0;
@@ -1914,8 +1942,38 @@ function scheduleVideoLayout() {
   videoLayoutFrame = requestAnimationFrame(updateVideoLayout);
 }
 
+function paintMiniVideo() {
+  cancelAnimationFrame(miniVideoFrame);
+  miniVideoFrame = 0;
+  const playingInLibrary = mobile.matches && document.body.dataset.view === "library" && !miniPlayer.inert &&
+    media === video && video.readyState >= 2 && video.videoWidth && video.videoHeight &&
+    !video.paused && !video.ended && !video.error;
+  if (!miniVideoContext || !playingInLibrary) {
+    miniVideo.hidden = true;
+    miniVideoTime = -Infinity;
+    return;
+  }
+  // Sample the active video so the mini player never starts a second media stream.
+  const time = video.currentTime;
+  if (miniVideo.hidden || Math.abs(time - miniVideoTime) >= 1 / 30) {
+    const scale = Math.min(miniVideo.width / video.videoWidth, miniVideo.height / video.videoHeight);
+    const width = video.videoWidth * scale;
+    const height = video.videoHeight * scale;
+    try {
+      miniVideoContext.clearRect(0, 0, miniVideo.width, miniVideo.height);
+      miniVideoContext.drawImage(video, (miniVideo.width - width) / 2, (miniVideo.height - height) / 2, width, height);
+      miniVideo.hidden = false;
+      miniVideoTime = time;
+    } catch {
+      miniVideo.hidden = true;
+    }
+  }
+  miniVideoFrame = requestAnimationFrame(paintMiniVideo);
+}
+
 function updateVideoLayout() {
   videoLayoutFrame = 0;
+  paintMiniVideo();
   if (videoStage.hidden) return;
   if (document.body.hasAttribute("data-video-expanded")) return;
   const queued = player.dataset.queue === "true";
@@ -2023,7 +2081,10 @@ document.addEventListener("fullscreenchange", () => {
   if (document.fullscreenElement !== fullscreenRoot && document.body.hasAttribute("data-video-expanded")) setVideoExpanded(false);
 });
 for (const event of ["loadedmetadata", "loadeddata", "emptied"]) {
-  video.addEventListener(event, updateVideoTools);
+  video.addEventListener(event, () => {
+    updateVideoTools();
+    scheduleVideoLayout();
+  });
 }
 
 const videoDoubleTapTime = 350;
@@ -2114,6 +2175,19 @@ onActiveMedia("error", () => {
 syncLayout();
 const storageReady = restoreTracks();
 setupMediaDownloads(saveDownloadedMedia);
+setupPCTransfer({
+  async getTracks() {
+    await storageReady;
+    return tracks.filter((track) => track.id !== undefined);
+  },
+  async hasTrack(pcTransferId) {
+    await storageReady;
+    if (!database) throw new Error("このブラウザでは端末保存を利用できません。");
+    return (await trackStore.run(database, "readonly", (store) => store.index("pcTransferId").getKey(pcTransferId))) !== undefined;
+  },
+  saveTrack: savePCTrack,
+  displayTitle: trackTitle,
+});
 
 if (mediaSession) {
   const actions = {
