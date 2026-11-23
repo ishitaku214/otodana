@@ -122,7 +122,7 @@ async function createDownloadRequest(connection, signal, showProgress) {
   if (!connection.origin || !connection.token) throw new DownloadConnectionError("取得サーバーのURLと接続キーを保存してください。");
   const origin = downloadServerOrigin(connection.origin);
   if (new URL(origin).hostname.endsWith(".onrender.com")) await waitForRenderServer(origin, signal, showProgress);
-  return async (path, { method = "GET", body, requestSignal = signal, expectedStatus } = {}) => {
+  return async (path, { method = "GET", body, requestSignal = signal, expectedStatuses = [] } = {}) => {
     let response;
     try {
       response = await fetch(origin + path, {
@@ -137,7 +137,7 @@ async function createDownloadRequest(connection, signal, showProgress) {
     if (response.status === 401) {
       throw new DownloadConnectionError("接続キーが一致しません。Renderの管理画面で接続キーを確認してください。");
     }
-    if (!response.ok && response.status !== expectedStatus) {
+    if (!response.ok && !expectedStatuses.includes(response.status)) {
       const details = await response.json().catch(() => ({}));
       throw new Error(typeof details?.message === "string" ? details.message : "取得サーバーでエラーが発生しました。");
     }
@@ -205,6 +205,7 @@ function setupMediaDownloads(saveMedia) {
   const menu = find("download-options");
   const progress = find("download-progress");
   const estimatePanel = find("download-estimate");
+  const estimateNote = find("download-estimate-note");
   const confirm = find("download-confirm");
   const message = find("download-message");
   const cancel = find("download-cancel");
@@ -250,15 +251,18 @@ function setupMediaDownloads(saveMedia) {
   }
 
   function showEstimate(estimate, input) {
-    const max = Number.isFinite(estimate.maxSavedBytes) ? estimate.maxSavedBytes : downloadLimit;
-    find("download-estimate-title").textContent = estimate.title;
-    find("download-estimate-source").textContent = Number.isFinite(estimate.sourceBytes)
+    const unavailable = estimate === null;
+    const max = Number.isFinite(estimate?.maxSavedBytes) ? estimate.maxSavedBytes : downloadLimit;
+    find("download-estimate-title").textContent = estimate?.title ?? "容量を確認できませんでした";
+    find("download-estimate-source").textContent = Number.isFinite(estimate?.sourceBytes)
       ? (estimate.approximate ? "約 " : "") + displayDownloadSize(estimate.sourceBytes)
       : "確認できません";
-    find("download-estimate-output").textContent = Number.isFinite(estimate.savedBytes)
+    find("download-estimate-output").textContent = Number.isFinite(estimate?.savedBytes)
       ? "約 " + displayDownloadSize(estimate.savedBytes) + "（上限 " + displayDownloadSize(max) + "）"
       : "変換後に確定（上限 " + displayDownloadSize(max) + "）";
-    confirm.textContent = input.format.toUpperCase() + "で保存を開始";
+    estimateNote.hidden = !unavailable;
+    estimateNote.textContent = unavailable ? "容量が不明なまま進むか、戻って別の形式を選べます。" : "";
+    confirm.textContent = input.format.toUpperCase() + (unavailable ? "の保存へ進む" : "で保存を開始");
     clearFeedback();
     checkedDownload = input;
     menu.hidden = true;
@@ -333,7 +337,7 @@ function setupMediaDownloads(saveMedia) {
     showProgress("取得サーバーの応答を確認しています…");
     const request = await createDownloadRequest(connectionFields(), signal, showProgress);
     // An empty estimate is rejected after authentication and starts no download.
-    const response = await request("/api/downloads/estimate", { method: "POST", body: {}, expectedStatus: 400 });
+    const response = await request("/api/downloads/estimate", { method: "POST", body: {}, expectedStatuses: [400] });
     const result = await response.json().catch(() => ({}));
     if (response.status !== 400 || result?.message !== "動画の共有リンクと保存形式を確認してください。") {
       throw new DownloadConnectionError("応答を受け取りましたが、音棚の取得サーバーとして確認できませんでした。");
@@ -349,10 +353,22 @@ function setupMediaDownloads(saveMedia) {
       const request = await createDownloadRequest(connection, signal, showProgress);
       if (!approvedUrl) {
         showProgress("動画の容量を確認しています…");
-        const response = await request("/api/downloads/estimate", { method: "POST", body: { url, format } });
-        const estimate = await response.json();
+        const response = await request("/api/downloads/estimate", {
+          method: "POST", body: { url, format }, expectedStatuses: [422, 504],
+        });
+        const estimate = await response.json().catch(() => null);
         signal.throwIfAborted();
-        showEstimate(estimate, { url, format });
+        const input = { url, format };
+        const olderServerFailure = (response.status === 504 && estimate?.message === "容量の確認に時間がかかりすぎました。") ||
+          (response.status === 422 && estimate?.message === "配信元から取得または変換できませんでした。時間をおいて試してください。");
+        if (!response.ok && (estimate?.code === "estimate_unavailable" || olderServerFailure)) {
+          showEstimate(null, input);
+        } else if (response.ok && typeof estimate?.title === "string") {
+          showEstimate(estimate, input);
+        } else {
+          throw new Error(typeof estimate?.message === "string" ? estimate.message :
+            "動画の容量を確認できませんでした。時間をおいてお試しください。");
+        }
         return;
       }
       const input = await downloadVideoPage(url, format, request, signal, showProgress);
