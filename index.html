@@ -10,13 +10,13 @@
   <link rel="icon" href="icon-192.png">
   <link rel="apple-touch-icon" href="icon-192.png">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="style.css?v=30">
+  <link rel="stylesheet" href="style.css?v=32">
   <script src="storage.js?v=27" defer></script>
   <script src="artwork.js?v=4" defer></script>
   <script src="queue.js?v=24" defer></script>
-  <script src="download.js?v=30" defer></script>
+  <script src="download.js?v=32" defer></script>
   <script src="pc-transfer.js?v=30" defer></script>
-  <script src="app.js?v=29" defer></script>
+  <script src="app.js?v=32" defer></script>
 </head>
 <body data-view="library">
   <main class="layout">
@@ -81,10 +81,6 @@
       <div class="player-header" id="player-header">
         <span class="drag-handle" aria-hidden="true"></span>
         <button type="button" id="library-tab" class="back"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12.5 4-6 6 6 6"/></svg>ライブラリ</button>
-        <div id="history-heading" class="queue-history-heading" hidden>
-          <h3 id="history-title">履歴</h3>
-          <button type="button" id="history-clear" aria-label="再生履歴を削除" disabled>削除</button>
-        </div>
       </div>
       <div class="player-content">
         <div class="player-stage">
@@ -102,7 +98,7 @@
             </div>
           </div>
           <section class="queue-panel" id="queue-panel" aria-labelledby="queue-title" inert>
-            <section class="queue-history" aria-label="再生履歴">
+            <section class="queue-history" id="queue-history" aria-label="再生履歴">
               <ol id="history-list" class="queue-list"></ol>
               <p id="history-empty">再生履歴はまだありません。</p>
             </section>
@@ -116,6 +112,10 @@
               <p id="queue-empty">次の曲はありません。</p>
             </div>
           </section>
+          <div id="history-heading" class="queue-history-heading" hidden>
+            <h3 id="history-title">履歴</h3>
+            <button type="button" id="history-clear" aria-label="再生履歴を削除" disabled>削除</button>
+          </div>
           <div id="video-stage" hidden>
             <video id="player-video" playsinline preload="metadata" aria-label="動画"></video>
             <img id="video-poster" alt="" hidden>
@@ -174,8 +174,8 @@
       <label class="import">端末のファイルを選ぶ
         <input id="file-picker" type="file" accept=".mp3,.mp4,.m4v,.mov,.webm,audio/mpeg,video/mp4,video/quicktime,video/webm" multiple aria-label="端末のファイルを選ぶ" autofocus>
       </label>
-      <button type="button" id="download-open" class="import">動画をダウンロード</button>
-      <button type="button" id="pc-transfer-open" class="import">別端末と同期</button>
+      <button type="button" id="download-open" class="import">ダウンロード</button>
+      <button type="button" id="pc-transfer-open" class="import">ほか端末と同期する</button>
     </div>
   </dialog>
 
@@ -195,6 +195,7 @@
     <div id="download-options" class="dialog-actions">
       <button type="button" value="mp4">MP4で保存</button>
       <button type="button" value="mp3">MP3で保存</button>
+      <label class="skip-download-estimate"><input type="checkbox" id="download-skip-estimate">容量確認を省いて保存</label>
     </div>
     <section id="download-estimate" aria-labelledby="download-estimate-title" hidden>
       <h3 id="download-estimate-title"></h3>
@@ -218,7 +219,7 @@
 
   <dialog id="pc-transfer-dialog" class="folder-dialog" aria-labelledby="pc-transfer-title">
     <div class="menu-heading">
-      <h2 id="pc-transfer-title">別端末と同期</h2>
+      <h2 id="pc-transfer-title">ほか端末と同期する</h2>
       <form method="dialog"><button type="submit" class="library-icon" aria-label="閉じる">×</button></form>
     </div>
     <p class="feedback">両方の端末を同じWi-Fiにつなぎ、それぞれで音棚を開いてください。</p>

@@ -38,6 +38,7 @@ const queueList = get("queue-list");
 const historyHeading = get("history-heading");
 const historyClear = get("history-clear");
 const historyList = get("history-list");
+const queueHistory = get("queue-history");
 const shuffleToggle = get("shuffle-toggle");
 const repeatToggle = get("repeat-toggle");
 const queueArtwork = get("queue-artwork");
@@ -88,6 +89,7 @@ let checkingStorage = true;
 let current = null;
 let objectUrl = null;
 let artworkUrl = null;
+let artworkTrack = null;
 let artworkRequest = 0;
 let playRequest = 0;
 let menuTrack = null;
@@ -261,16 +263,17 @@ function updateMediaMetadata() {
     title: trackTitle(current),
     artist: trackArtist(current),
     album: trackAlbum(current),
-    artwork: artworkUrl ? [{ src: artworkUrl }] : [],
+    artwork: artworkTrack === current && artworkUrl ? [{ src: artworkUrl }] : [],
   }) : null;
 }
 
-function queueTrackButton(track, action) {
+function queueTrackButton(track, action, showArtist = false) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "queue-track";
   const thumbnail = document.createElement("span");
   thumbnail.className = "thumb";
+  thumbnail.toggleAttribute("data-loading", !track.previewReady && !track.thumbnail);
   thumbnail.setAttribute("aria-hidden", "true");
   const image = document.createElement("img");
   image.alt = "";
@@ -281,7 +284,19 @@ function queueTrackButton(track, action) {
   const title = document.createElement("span");
   title.className = "queue-name";
   title.textContent = queueTrackTitle(track);
-  button.append(thumbnail, title);
+  button.append(thumbnail);
+  if (showArtist) {
+    const copy = document.createElement("span");
+    copy.className = "queue-history-copy";
+    const artist = document.createElement("span");
+    artist.className = "queue-artist";
+    artist.textContent = trackArtist(track);
+    artist.hidden = !artist.textContent;
+    copy.append(title, artist);
+    button.append(copy);
+  } else {
+    button.append(title);
+  }
   button.addEventListener("click", action);
   if (track.preview || !queueThumbnailObserver) showTrackThumbnail(thumbnail);
   else queueThumbnailObserver.observe(thumbnail);
@@ -297,8 +312,15 @@ async function showTrackThumbnail(thumbnail) {
   track.preview ??= loadTrackPreview(track);
   await track.preview;
   if (!thumbnail.isConnected) return;
-  const title = thumbnail.parentElement.querySelector(".queue-name");
+  thumbnail.removeAttribute("data-loading");
+  const row = thumbnail.parentElement;
+  const title = row.querySelector(".queue-name");
   if (title) title.textContent = trackTitle(track);
+  const artist = row.querySelector(".queue-artist");
+  if (artist) {
+    artist.textContent = trackArtist(track);
+    artist.hidden = !artist.textContent;
+  }
   if (track.thumbnail) {
     const image = thumbnail.firstElementChild;
     image.src = track.thumbnail;
@@ -326,7 +348,7 @@ function renderQueue(anchor = false) {
     row.append(queueTrackButton(track, () => {
       selectTrack(track);
       queueToggle.focus({ preventScroll: true });
-    }));
+    }, true));
     return row;
   });
   historyList.replaceChildren(...historyRows);
@@ -365,7 +387,7 @@ function renderQueue(anchor = false) {
     resetQueueScroll();
   }
   queuePanel.scrollTop = anchor ? queueAnchor() : scroll;
-  updateHistoryHeading();
+  updateQueueViewport();
   scheduleVideoLayout();
 }
 
@@ -373,12 +395,13 @@ historyClear.addEventListener("click", () => {
   const playingEntry = recordedCurrent && queue.history.at(-1) === current;
   queue.history = playingEntry ? [current] : [];
   saveHistory();
-  renderQueue();
-  queuePanel.scrollTop = 0;
+  renderQueue(true);
+  queueCurrent.focus({ preventScroll: true });
 });
 
 function queueAnchor() {
-  return queueCurrent.offsetTop;
+  // The current row's offset moves when it sticks to the top or bottom.
+  return queueHistory.offsetTop + queueHistory.offsetHeight;
 }
 
 function scrollSide(position) {
@@ -386,8 +409,21 @@ function scrollSide(position) {
   return Math.abs(difference) <= 2 ? 0 : Math.sign(difference);
 }
 
-function updateHistoryHeading() {
-  historyHeading.hidden = player.dataset.queue !== "true" || scrollSide(queuePanel.scrollTop) >= 0;
+function updateQueueViewport() {
+  const showingQueue = player.dataset.queue === "true";
+  historyHeading.hidden = !showingQueue;
+  if (!showingQueue) return;
+
+  const scroll = Math.max(0, queuePanel.scrollTop);
+  const distance = queueAnchor() - scroll;
+  const rowTop = Math.max(0, Math.min(distance, queuePanel.clientHeight - queueCurrent.offsetHeight));
+  const headingHeight = historyHeading.offsetHeight;
+  const showingHistory = headingHeight > 0 && rowTop > headingHeight;
+  historyHeading.toggleAttribute("data-visible", showingHistory);
+  // Fade the history under its heading and clip both lists behind the pinned row.
+  queuePanel.style.setProperty("--history-start", (scroll + (showingHistory ? headingHeight : -12)) + "px");
+  queuePanel.style.setProperty("--history-end", (scroll + rowTop) + "px");
+  queuePanel.style.setProperty("--upcoming-start", Math.max(0, -distance) + "px");
 }
 
 function unlockQueueScroll() {
@@ -431,13 +467,15 @@ function settleHistoryEntry(touch) {
   const anchor = queueAnchor();
   const threshold = last?.previousElementSibling?.offsetTop ??
     (last ? last.offsetTop + last.offsetHeight / 2 : anchor / 2);
-  const historyEnd = last ? Math.max(0, last.offsetTop + last.offsetHeight - queuePanel.clientHeight) : 0;
+  const historyEnd = last
+    ? Math.max(0, Math.min(anchor, last.offsetTop + last.offsetHeight + queueCurrent.offsetHeight - queuePanel.clientHeight))
+    : 0;
   const target = queuePanel.scrollTop <= threshold ? historyEnd : anchor;
   settleQueueAt(target, touch);
 }
 
 queuePanel.addEventListener("scroll", () => {
-  updateHistoryHeading();
+  updateQueueViewport();
   scheduleVideoLayout();
   const gesture = queueTouch;
   if (!gesture || gesture.stopped || !gesture.side || (!gesture.active && performance.now() > gesture.until)) return;
@@ -509,7 +547,7 @@ function showQueue(visible) {
   if (visible) renderQueue(true);
   else {
     resetQueueScroll();
-    updateHistoryHeading();
+    updateQueueViewport();
     cancelQueueGesture();
     queueThumbnailObserver?.disconnect();
   }
@@ -590,6 +628,7 @@ async function play() {
 
 function clearArtwork() {
   ++artworkRequest;
+  document.body.removeAttribute("data-artwork-loading");
   for (const image of [artwork, miniArtwork, queueArtwork, videoPoster]) {
     image.hidden = true;
     image.removeAttribute("src");
@@ -597,6 +636,8 @@ function clearArtwork() {
   if (artworkUrl) URL.revokeObjectURL(artworkUrl);
   video.removeAttribute("poster");
   artworkUrl = null;
+  artworkTrack = null;
+  updateMediaMetadata();
 }
 
 function setBackdrop(image) {
@@ -640,7 +681,9 @@ function clearSource(nextMedia = audio) {
   media.load();
   if (objectUrl) URL.revokeObjectURL(objectUrl);
   objectUrl = null;
-  clearArtwork();
+  video.removeAttribute("poster");
+  videoPoster.hidden = true;
+  videoPoster.removeAttribute("src");
 }
 
 function tintPlayer(image) {
@@ -682,7 +725,9 @@ function updateTrackMetadata(track, metadata) {
 }
 
 async function showArtwork(track) {
-  const request = artworkRequest;
+  const request = ++artworkRequest;
+  let pendingUrl;
+  document.body.setAttribute("data-artwork-loading", "");
   try {
     const metadata = await readMediaMetadata(track);
     if (request !== artworkRequest) return;
@@ -690,47 +735,57 @@ async function showArtwork(track) {
     const cover = track.edits?.cover ?? (isVideo(track) ? await getVideoThumbnail(track) : metadata.artwork);
     if (request !== artworkRequest) return;
     if (!cover) {
+      clearArtwork();
       setBackdrop(null);
       return;
     }
-    artworkUrl = URL.createObjectURL(cover);
-    artwork.src = artworkUrl;
-    await artwork.decode();
+    // Decode before replacing the previous image, including when loading a smaller copy.
+    const image = new Image();
+    pendingUrl = URL.createObjectURL(cover);
+    image.src = pendingUrl;
+    await image.decode();
     if (request !== artworkRequest) return;
-    if (Math.max(artwork.naturalWidth, artwork.naturalHeight) > 768) {
-      const resized = await encodeCover(artwork).catch(() => null);
+    if (Math.max(image.naturalWidth, image.naturalHeight) > 768) {
+      const resized = await encodeCover(image).catch(() => null);
       if (request !== artworkRequest) return;
       if (resized) {
-        URL.revokeObjectURL(artworkUrl);
-        artworkUrl = URL.createObjectURL(resized);
-        artwork.src = artworkUrl;
-        await artwork.decode();
+        URL.revokeObjectURL(pendingUrl);
+        pendingUrl = URL.createObjectURL(resized);
+        image.src = pendingUrl;
+        await image.decode();
         if (request !== artworkRequest) return;
       }
     }
-    artwork.hidden = false;
+    const previousUrl = artworkUrl;
+    artworkUrl = pendingUrl;
+    artworkTrack = track;
+    pendingUrl = null;
+    for (const target of [artwork, miniArtwork, queueArtwork]) {
+      target.src = artworkUrl;
+      target.hidden = false;
+    }
     if (isVideo(track)) {
       video.poster = artworkUrl;
       videoPoster.src = artworkUrl;
       videoPoster.hidden = false;
     }
-    miniArtwork.src = artworkUrl;
-    miniArtwork.hidden = false;
-    queueArtwork.src = artworkUrl;
-    queueArtwork.hidden = false;
+    if (previousUrl) URL.revokeObjectURL(previousUrl);
+    document.body.removeAttribute("data-artwork-loading");
     updateMediaMetadata();
     try {
-      tintPlayer(artwork);
+      tintPlayer(image);
     } catch {
       // Artwork can still be shown when pixel access is restricted.
     }
-    const softImage = await makeBackdrop(artwork).catch(() => null);
+    const softImage = await makeBackdrop(image).catch(() => null);
     if (request === artworkRequest) setBackdrop(softImage);
   } catch {
     if (request === artworkRequest) {
       clearArtwork();
       setBackdrop(null);
     }
+  } finally {
+    if (pendingUrl) URL.revokeObjectURL(pendingUrl);
   }
 }
 
@@ -1097,6 +1152,7 @@ async function deleteTracks(entries) {
   saveHistory();
   if (removed.has(current)) {
     clearSource();
+    clearArtwork();
     setBackdrop(null);
     current = null;
     playbackTracking = true;
@@ -1287,7 +1343,9 @@ function recordPlay(track) {
 }
 
 function loadTrackPreview(track) {
-  const preview = previewQueue.then(() => tracks.includes(track) ? decodeTrackPreview(track) : undefined);
+  track.previewReady = false;
+  const preview = previewQueue.then(() => tracks.includes(track) ? decodeTrackPreview(track) : undefined)
+    .finally(() => { track.previewReady = true; });
   previewQueue = preview;
   return preview;
 }
@@ -1349,6 +1407,7 @@ function updateTrackRow(row) {
   row.querySelector(".more").setAttribute("aria-label", title + "の操作");
   row.querySelector(".library-handle").setAttribute("aria-label", title + "を並べ替え");
   const image = row.querySelector("img");
+  image.parentElement.toggleAttribute("data-loading", !track.previewReady && !track.thumbnail);
   if (track.thumbnail) image.src = track.thumbnail;
   image.hidden = !track.thumbnail;
 }
@@ -2015,7 +2074,6 @@ get("details-form").addEventListener("submit", async (event) => {
       track.thumbnail = null;
       track.preview = loadTrackPreview(track);
       if (current === track) {
-        clearArtwork();
         showArtwork(track);
       }
     }
@@ -2169,7 +2227,10 @@ if (typeof ResizeObserver === "function") {
   const videoResize = new ResizeObserver(scheduleVideoLayout);
   for (const target of [videoStage.parentElement, videoSlot, queueVideoSlot, videoControls]) videoResize.observe(target);
 }
-window.addEventListener("resize", scheduleVideoLayout);
+window.addEventListener("resize", () => {
+  updateQueueViewport();
+  scheduleVideoLayout();
+});
 
 function updateVideoTools() {
   videoFullscreen.disabled = media !== video || video.readyState < 1 || !video.videoWidth;

@@ -295,6 +295,7 @@ function setupMediaDownloads(saveMedia) {
   const dialog = find("download-dialog");
   const urlField = find("download-url");
   const settingsButton = find("download-settings");
+  const skipEstimate = find("download-skip-estimate");
   const menu = find("download-options");
   const progress = find("download-progress");
   const estimatePanel = find("download-estimate");
@@ -343,7 +344,7 @@ function setupMediaDownloads(saveMedia) {
   }
 
   function toggleRunning(running) {
-    for (const element of [urlField, settingsButton, ...formats]) element.disabled = running;
+    for (const element of [urlField, settingsButton, skipEstimate, ...formats]) element.disabled = running;
     cancel.hidden = !running;
     cancel.disabled = close.disabled = false;
   }
@@ -398,7 +399,7 @@ function setupMediaDownloads(saveMedia) {
       const url = approvedUrl ?? urlField.value.trim();
       if (!url) throw new Error("YouTubeまたはニコニコ動画の共有リンクを入力してください。");
       const request = await createDownloadRequest(readDownloadConnection(), signal, showProgress);
-      if (!approvedUrl) {
+      if (!approvedUrl && !skipEstimate.checked) {
         showProgress("動画の容量を確認しています…");
         const response = await request("/api/downloads/estimate", {
           method: "POST", body: { url, format }, expectedStatuses: [422, 504],
