@@ -83,12 +83,26 @@ function pcTransferMessage(data) {
 }
 
 function pcTrackInfo(track, deviceId) {
+  const storedFilename = typeof track.filename === "string" && track.filename.trim();
+  const blobFilename = typeof track.blob.name === "string" && track.blob.name.trim();
+  const originalName = storedFilename || blobFilename || "";
+  const extension = originalName.match(/\.([a-z0-9]+)$/i)?.[1].toLowerCase();
+  let format = track.format;
+  if (!Object.hasOwn(mediaFormats, format)) {
+    format = Object.hasOwn(mediaFormats, extension) ? extension
+      : Object.keys(mediaFormats).find((key) => mediaFormats[key] === track.blob.type) ?? "mp3";
+  }
+  const fallbackTitle = format === "mp3" ? "曲" : "動画";
+  const title = [track.title, originalName.replace(/\.[a-z0-9]+$/i, ""), track.metadata?.title, track.edits?.title]
+    .find((value) => typeof value === "string" && value.trim())?.trim() || fallbackTitle;
+  const basename = title.replace(/[\\/:*?"<>|\p{Cc}]+/gu, " ").trim() || fallbackTitle;
+  const filename = originalName.slice(0, 300) || basename.slice(0, 299 - format.length) + "." + format;
   const entry = {
     type: "item",
-    title: track.title.slice(0, 300),
-    filename: track.filename.slice(0, 300),
+    title: title.slice(0, 300),
+    filename,
     bytes: track.blob.size,
-    format: track.format ?? "mp3",
+    format,
     pcTransferId: track.pcTransferId ?? deviceId + ":" + track.id,
   };
   if (track.edits) {
@@ -246,14 +260,14 @@ function setupPCTransfer(library) {
   }
 
   async function loadChoices() {
-    available = (await library.getTracks()).filter((track) => track.blob.size > 0 && track.blob.size <= pcTransferLimit);
+    available = (await library.getTracks()).filter((track) => track.blob?.size > 0 && track.blob.size <= pcTransferLimit);
     list.replaceChildren(...available.map((track, index) => {
       const row = document.createElement("label");
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.value = index;
       const title = document.createElement("span");
-      title.textContent = library.displayTitle(track) || track.filename;
+      title.textContent = library.displayTitle(track) || track.filename || track.blob.name || "名前のない項目";
       const size = document.createElement("small");
       size.textContent = (track.blob.size / 1_000_000).toFixed(1) + " MB";
       row.append(checkbox, title, size);
