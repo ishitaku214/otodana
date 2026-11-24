@@ -192,30 +192,17 @@ function displayDownloadSize(bytes) {
   return amount + (megabytes ? " MB" : " KB");
 }
 
-function setupMediaDownloads(saveMedia) {
+function setupDownloadSettings() {
   const find = (id) => document.getElementById(id);
-  const dialog = find("download-dialog");
-  const urlField = find("download-url");
   const config = find("download-config");
   const serverField = find("download-server");
   const tokenField = find("download-token");
   const saveConfig = find("download-config-save");
   const checkConnection = find("download-check");
   const healthLink = find("download-health-link");
-  const menu = find("download-options");
-  const progress = find("download-progress");
-  const estimatePanel = find("download-estimate");
-  const estimateNote = find("download-estimate-note");
-  const confirm = find("download-confirm");
-  const message = find("download-message");
-  const cancel = find("download-cancel");
-  const close = find("download-close");
-  const formats = Array.from(menu.querySelectorAll("button"));
-  let connection = readDownloadConnection();
-  let job;
-  let checkedDownload;
-  serverField.value = connection.origin || "";
-  tokenField.value = connection.token || "";
+  const progress = find("download-config-progress");
+  const message = find("download-config-message");
+  let checking;
 
   function updateHealthLink() {
     try {
@@ -232,8 +219,93 @@ function setupMediaDownloads(saveMedia) {
     if (token.length < 24) throw new DownloadConnectionError("取得サーバーの接続キーを入力してください。");
     return { origin, token };
   }
-  updateHealthLink();
   serverField.addEventListener("input", updateHealthLink);
+
+  function toggleChecking(running) {
+    for (const element of [serverField, tokenField, saveConfig, checkConnection]) element.disabled = running;
+    progress.hidden = !running;
+  }
+
+  function cancelCheck() {
+    checking?.abort();
+    checking = null;
+    toggleChecking(false);
+  }
+
+  for (const opener of document.querySelectorAll('[aria-controls="download-config"]')) {
+    opener.addEventListener("click", () => {
+      if (config.open) return;
+      const connection = readDownloadConnection();
+      serverField.value = connection.origin || "";
+      tokenField.value = connection.token || "";
+      message.textContent = "";
+      updateHealthLink();
+      config.showModal();
+    });
+  }
+  find("download-config-close").addEventListener("click", () => {
+    cancelCheck();
+    config.close();
+  });
+  config.addEventListener("cancel", cancelCheck);
+  saveConfig.addEventListener("click", () => {
+    try {
+      localStorage.setItem(downloadConnectionKey, JSON.stringify(connectionFields()));
+      message.textContent = "取得サーバーの設定を保存しました。";
+    } catch (error) {
+      message.textContent = error.message;
+    }
+  });
+  checkConnection.addEventListener("click", async () => {
+    if (checking) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    checking = controller;
+    toggleChecking(true);
+    const showStatus = (text) => {
+      if (checking === controller) message.textContent = text;
+    };
+    showStatus("取得サーバーの応答を確認しています…");
+    try {
+      if (!/^https?:$/.test(location.protocol)) {
+        throw new Error("この機能はGitHub Pagesの公開ページか、Windowsのローカルサーバーで使えます。");
+      }
+      const request = await createDownloadRequest(connectionFields(), signal, showStatus);
+      // An empty estimate is rejected after authentication and starts no download.
+      const response = await request("/api/downloads/estimate", { method: "POST", body: {}, expectedStatuses: [400] });
+      const result = await response.json().catch(() => ({}));
+      if (response.status !== 400 || result?.message !== "動画の共有リンクと保存形式を確認してください。") {
+        throw new DownloadConnectionError("応答を受け取りましたが、音棚の取得サーバーとして確認できませんでした。");
+      }
+      showStatus("取得サーバーに接続できました。接続キーも有効です。");
+    } catch (error) {
+      showStatus(error.message);
+    } finally {
+      if (checking === controller) {
+        checking = null;
+        toggleChecking(false);
+      }
+    }
+  });
+}
+
+function setupMediaDownloads(saveMedia) {
+  setupDownloadSettings();
+  const find = (id) => document.getElementById(id);
+  const dialog = find("download-dialog");
+  const urlField = find("download-url");
+  const settingsButton = find("download-settings");
+  const menu = find("download-options");
+  const progress = find("download-progress");
+  const estimatePanel = find("download-estimate");
+  const estimateNote = find("download-estimate-note");
+  const confirm = find("download-confirm");
+  const message = find("download-message");
+  const cancel = find("download-cancel");
+  const close = find("download-close");
+  const formats = Array.from(menu.querySelectorAll("button"));
+  let job;
+  let checkedDownload;
 
   function showProgress(text, percent) {
     progress.hidden = false;
@@ -271,7 +343,7 @@ function setupMediaDownloads(saveMedia) {
   }
 
   function toggleRunning(running) {
-    for (const element of [urlField, serverField, tokenField, saveConfig, checkConnection, ...formats]) element.disabled = running;
+    for (const element of [urlField, settingsButton, ...formats]) element.disabled = running;
     cancel.hidden = !running;
     cancel.disabled = close.disabled = false;
   }
@@ -291,17 +363,6 @@ function setupMediaDownloads(saveMedia) {
     else job?.abort();
   });
   cancel.addEventListener("click", () => job?.abort());
-  saveConfig.addEventListener("click", () => {
-    try {
-      const settings = connectionFields();
-      localStorage.setItem(downloadConnectionKey, JSON.stringify(settings));
-      connection = settings;
-      clearFeedback();
-      message.textContent = "取得サーバーの設定を保存しました。";
-    } catch (error) {
-      message.textContent = error.message;
-    }
-  });
   urlField.addEventListener("input", clearFeedback);
   find("download-estimate-back").addEventListener("click", () => {
     clearFeedback();
@@ -325,7 +386,6 @@ function setupMediaDownloads(saveMedia) {
       await operation(signal);
     } catch (error) {
       progress.hidden = true;
-      if (error instanceof DownloadConnectionError) config.open = true;
       message.textContent = signal.aborted ? "中止しました。" : error.message;
     } finally {
       job = null;
@@ -333,24 +393,11 @@ function setupMediaDownloads(saveMedia) {
     }
   }
 
-  checkConnection.addEventListener("click", () => runTask(async (signal) => {
-    showProgress("取得サーバーの応答を確認しています…");
-    const request = await createDownloadRequest(connectionFields(), signal, showProgress);
-    // An empty estimate is rejected after authentication and starts no download.
-    const response = await request("/api/downloads/estimate", { method: "POST", body: {}, expectedStatuses: [400] });
-    const result = await response.json().catch(() => ({}));
-    if (response.status !== 400 || result?.message !== "動画の共有リンクと保存形式を確認してください。") {
-      throw new DownloadConnectionError("応答を受け取りましたが、音棚の取得サーバーとして確認できませんでした。");
-    }
-    progress.hidden = true;
-    message.textContent = "取得サーバーに接続できました。接続キーも有効です。";
-  }));
-
   function run(format, approvedUrl) {
     return runTask(async (signal) => {
       const url = approvedUrl ?? urlField.value.trim();
       if (!url) throw new Error("YouTubeまたはニコニコ動画の共有リンクを入力してください。");
-      const request = await createDownloadRequest(connection, signal, showProgress);
+      const request = await createDownloadRequest(readDownloadConnection(), signal, showProgress);
       if (!approvedUrl) {
         showProgress("動画の容量を確認しています…");
         const response = await request("/api/downloads/estimate", {

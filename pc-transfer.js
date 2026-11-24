@@ -260,7 +260,7 @@ function setupPCTransfer(library) {
       return row;
     }));
     find("selection").textContent = available.length ? "送るファイルを選んでください。1件128 MBまで。" :
-      "送れる項目がありません。先にPCのライブラリにファイルを追加してください（1件128 MBまで）。";
+      "送れる項目がありません。この端末のライブラリにファイルを追加してください（1件128 MBまで）。";
     updateControls();
   }
 
@@ -276,7 +276,7 @@ function setupPCTransfer(library) {
   async function run(sending) {
     if (controller) return;
     if (!window.isSecureContext || location.protocol === "file:" || !window.RTCPeerConnection) {
-      showProgress("PCから取り込むには、公開版の音棚を対応するブラウザで開いてください。");
+      showProgress("同期するには、公開版の音棚を対応するブラウザで開いてください。");
       return;
     }
     const session = new AbortController();
@@ -310,7 +310,7 @@ function setupPCTransfer(library) {
         room = pcTransferPath + "/" + code;
         codeDisplay.value = code.match(/.{4}/g).join("-");
         find("pair").hidden = false;
-        showProgress("iPhoneでコードを入力してください。");
+        showProgress("受け取る端末でコードを入力してください。");
         while (true) {
           const pending = await request(room);
           const { answer } = await pending.json();
@@ -382,11 +382,4 @@ function setupPCTransfer(library) {
   connect.addEventListener("click", () => run(false));
   cancel.addEventListener("click", () => controller?.abort(new Error("転送を中止しました。保存済みの項目はライブラリに残っています。")));
   dialog.addEventListener("close", () => cancel.click());
-  find("settings").addEventListener("click", () => {
-    dialog.close();
-    document.getElementById("download-open").click();
-    const config = document.getElementById("download-config");
-    config.open = true;
-    config.querySelector("summary").focus();
-  });
 }

@@ -852,12 +852,14 @@ body[data-video-expanded]:not([data-video-controls]) .player-controls {
 .dialog-actions button[value="confirm"] { background: var(--accent); color: #173528; font-weight: 700; }
 .add-options { display: grid; gap: 8px; margin-top: 9px; }
 .add-options .import { min-height: 48px; font-size: 15px; }
-#download-dialog, #pc-transfer-dialog {
+#download-dialog, #pc-transfer-dialog, #download-config {
   width: min(430px, calc(100% - 34px));
   max-height: min(85vh, 710px);
   max-height: min(85dvh, 710px);
   overflow: auto;
 }
+#download-config { width: min(382px, calc(100% - 54px)); }
+#download-config::backdrop { background: #050a086e; }
 .youtube-link {
   display: grid;
   place-items: center;
@@ -868,8 +870,8 @@ body[data-video-expanded]:not([data-video-controls]) .player-controls {
   -webkit-tap-highlight-color: transparent;
 }
 .youtube-link svg { width: 32px; height: 22px; }
-#download-dialog > label, .download-config label { color: var(--muted); font-size: 13px; }
-#download-url, .download-config input, .pc-transfer-panel input[type="text"] {
+#download-dialog > label, .download-config-fields label { color: var(--muted); font-size: 13px; }
+#download-url, .download-config-fields input, .pc-transfer-panel input[type="text"] {
   display: block;
   width: 100%;
   min-height: 44px;
@@ -881,7 +883,17 @@ body[data-video-expanded]:not([data-video-controls]) .player-controls {
   color: var(--ink);
   font-size: 16px;
 }
-#download-cancel, #download-config-save, #download-check {
+:is(#folder-name, #download-server, #download-token) {
+  -webkit-appearance: none;
+  appearance: none;
+  box-shadow: none;
+}
+:is(#folder-name, #download-server, #download-token):focus,
+:root[data-keyboard-focus] :is(#folder-name, #download-server, #download-token):focus-visible {
+  outline: none;
+  border-color: #86a874;
+}
+#download-cancel, #pc-transfer-cancel {
   min-height: 44px;
   padding: 0 12px;
   border: 0;
@@ -895,12 +907,27 @@ body[data-video-expanded]:not([data-video-controls]) .player-controls {
 #download-estimate dl { display: grid; gap: 3px; margin: 10px 0 14px; }
 #download-estimate dt { color: var(--muted); font-size: 13px; }
 #download-estimate dd { margin: 0 0 5px; }
-.download-config { margin-top: 10px; }
-.download-config summary { padding: 10px 0; color: var(--muted); cursor: pointer; }
-.download-config > div { display: grid; gap: 5px; padding-bottom: 8px; }
+.connection-settings {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding: 4px 2px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  text-align: start;
+  font-size: 14px;
+}
+.connection-settings span { color: var(--accent); font-size: 22px; }
+.download-config-fields { display: grid; gap: 5px; margin-top: 9px; }
+.download-config-fields > p:empty { display: none; }
 .download-links { display: grid; gap: 5px; }
 .download-links a { color: var(--accent); font-size: 14px; padding: 8px 0; }
-#download-progress { display: block; width: 100%; height: 12px; margin-top: 14px; accent-color: var(--accent); }
+#download-progress, #download-config-progress { display: block; width: 100%; height: 12px; margin-top: 14px; accent-color: var(--accent); }
 #pc-transfer-modes button[aria-pressed="true"], .pc-transfer-primary {
   background: var(--accent);
   color: #173528;
