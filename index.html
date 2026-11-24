@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="ja">
+<html lang="ja" translate="no">
 <head>
   <meta charset="utf-8">
+  <meta name="google" content="notranslate">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta id="theme-color" name="theme-color" content="#000000">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob:; media-src blob:; connect-src 'self' https:; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
@@ -9,13 +10,13 @@
   <link rel="icon" href="icon-192.png">
   <link rel="apple-touch-icon" href="icon-192.png">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="style.css?v=28">
+  <link rel="stylesheet" href="style.css?v=29">
   <script src="storage.js?v=27" defer></script>
   <script src="artwork.js?v=4" defer></script>
   <script src="queue.js?v=24" defer></script>
   <script src="download.js?v=26" defer></script>
   <script src="pc-transfer.js?v=27" defer></script>
-  <script src="app.js?v=28" defer></script>
+  <script src="app.js?v=29" defer></script>
 </head>
 <body data-view="library">
   <main class="layout">
@@ -80,6 +81,10 @@
       <div class="player-header" id="player-header">
         <span class="drag-handle" aria-hidden="true"></span>
         <button type="button" id="library-tab" class="back"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12.5 4-6 6 6 6"/></svg>ライブラリ</button>
+        <div id="history-heading" class="queue-history-heading" hidden>
+          <h3 id="history-title">履歴</h3>
+          <button type="button" id="history-clear" aria-label="再生履歴を削除" disabled>削除</button>
+        </div>
       </div>
       <div class="player-content">
         <div class="player-stage">
@@ -97,11 +102,7 @@
             </div>
           </div>
           <section class="queue-panel" id="queue-panel" aria-labelledby="queue-title" inert>
-            <section class="queue-history" aria-labelledby="history-title">
-              <div id="history-heading" class="queue-history-heading">
-                <h3 id="history-title">履歴</h3>
-                <button type="button" id="history-clear" aria-label="再生履歴を削除" disabled>削除</button>
-              </div>
+            <section class="queue-history" aria-label="再生履歴">
               <ol id="history-list" class="queue-list"></ol>
               <p id="history-empty">再生履歴はまだありません。</p>
             </section>
@@ -136,11 +137,11 @@
         </div>
         <div class="player-foot">
           <div class="player-tools">
+            <button type="button" id="queue-toggle" class="player-actions" aria-label="次に再生する曲を表示" aria-controls="queue-panel" aria-pressed="false" hidden><span class="queue-symbol" aria-hidden="true"></span></button>
             <button id="video-fullscreen" class="player-actions" type="button" aria-label="動画を全画面" hidden disabled>
               <svg class="video-expand-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5m6 0h5v5m0 6v5h-5m-6 0H4v-5"/></svg>
               <svg class="video-shrink-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h5V4m6 0v5h5m0 6h-5v5m-6 0v-5H4"/></svg>
             </button>
-            <button type="button" id="queue-toggle" class="player-actions" aria-label="次に再生する曲を表示" aria-controls="queue-panel" aria-pressed="false" hidden><span class="queue-symbol" aria-hidden="true"></span></button>
           </div>
         </div>
         <p id="player-message" class="feedback player-feedback" role="status"></p>
@@ -269,6 +270,7 @@
     <div class="menu-heading"><h2 id="menu-title"></h2><button type="button" id="menu-close" aria-label="閉じる">×</button></div>
     <p id="menu-status"></p>
     <button type="button" id="menu-add" class="save" hidden><span aria-hidden="true">＋</span> フォルダへ一括追加</button>
+    <button type="button" id="menu-rename-folder" class="save" hidden>フォルダ名を変更</button>
     <button type="button" id="menu-move-out" class="save" hidden>フォルダから出す</button>
     <button type="button" id="menu-bulk-out" class="save" hidden>フォルダから一括で出す</button>
     <button type="button" id="menu-bulk-delete" class="delete" hidden>一括削除</button>
@@ -319,7 +321,7 @@
       <input id="folder-name" required maxlength="80" autofocus>
       <div class="dialog-actions">
         <button value="cancel" formnovalidate>キャンセル</button>
-        <button value="confirm">作成</button>
+        <button id="folder-submit" value="confirm">作成</button>
       </div>
     </form>
   </dialog>

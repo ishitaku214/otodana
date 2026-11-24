@@ -37,6 +37,7 @@ const queueCurrent = get("queue-current");
 const queueList = get("queue-list");
 const historyHeading = get("history-heading");
 const historyClear = get("history-clear");
+const historyList = get("history-list");
 const shuffleToggle = get("shuffle-toggle");
 const repeatToggle = get("repeat-toggle");
 const queueArtwork = get("queue-artwork");
@@ -65,8 +66,11 @@ const detailsSave = get("details-save");
 const detailsImage = get("details-image");
 const mobile = matchMedia("(max-width: 730px)");
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
-const historyScroll = { touchSide: 0, touching: false, touchUntil: 0, lastWheel: -Infinity, wheelSide: 0, wheelStopped: false };
+let queueTouch;
+let queueWheel;
+let queueWheelTimer;
 let queueSettleTimer;
+let queueSettleFrame;
 const mediaSession = navigator.mediaSession;
 const tracks = [];
 const folders = [];
@@ -78,6 +82,7 @@ let trackSelection = null;
 let customTrackOrder = false;
 const queue = new PlaybackQueue();
 const historyKey = "otodana-playback-history";
+const playbackKey = "otodana-playback-checkpoint";
 let database = null;
 let checkingStorage = true;
 let current = null;
@@ -95,6 +100,7 @@ let searching = false;
 let recordedCurrent = false;
 let backdrop = null;
 let importQueue = Promise.resolve();
+let previewQueue = Promise.resolve();
 let saveToastTimer;
 let videoLayoutFrame = 0;
 let miniVideoFrame = 0;
@@ -103,10 +109,13 @@ let activeLibraryButton = null;
 let seekDrag = null;
 let fullscreenControlsTimer;
 let videoSkipTimer;
-let videoTapTimer;
 let videoPointer;
 let previousVideoTap;
 let landscapeLocked = false;
+let resumePosition = null;
+let playbackSnapshot = null;
+let playbackTracking = false;
+let lastCheckpoint = 0;
 const marqueeRows = new WeakMap();
 const marqueeObserver = typeof ResizeObserver === "function"
   ? new ResizeObserver((entries) => entries.forEach(({ target }) => measureMarquee(target))) : null;
@@ -263,30 +272,34 @@ function queueTrackButton(track, action) {
   const thumbnail = document.createElement("span");
   thumbnail.className = "thumb";
   thumbnail.setAttribute("aria-hidden", "true");
-  if (track.thumbnail || isVideo(track)) {
-    const image = document.createElement("img");
-    image.alt = "";
-    image.hidden = !track.thumbnail;
-    if (track.thumbnail) image.src = track.thumbnail;
-    thumbnail.append(image);
-    if (!track.thumbnail) {
-      thumbnail.track = track;
-      if (queueThumbnailObserver) queueThumbnailObserver.observe(thumbnail);
-      else showTrackThumbnail(thumbnail);
-    }
-  }
+  const image = document.createElement("img");
+  image.alt = "";
+  image.hidden = !track.thumbnail;
+  if (track.thumbnail) image.src = track.thumbnail;
+  thumbnail.append(image);
+  thumbnail.track = track;
   const title = document.createElement("span");
-  title.textContent = trackTitle(track);
+  title.className = "queue-name";
+  title.textContent = queueTrackTitle(track);
   button.append(thumbnail, title);
   button.addEventListener("click", action);
+  if (track.preview || !queueThumbnailObserver) showTrackThumbnail(thumbnail);
+  else queueThumbnailObserver.observe(thumbnail);
   return button;
+}
+
+function queueTrackTitle(track) {
+  return track.metadata || track.edits?.title || isVideo(track) ? trackTitle(track) : "読み込み中…";
 }
 
 async function showTrackThumbnail(thumbnail) {
   const track = thumbnail.track;
   track.preview ??= loadTrackPreview(track);
   await track.preview;
-  if (thumbnail.isConnected && track.thumbnail) {
+  if (!thumbnail.isConnected) return;
+  const title = thumbnail.parentElement.querySelector(".queue-name");
+  if (title) title.textContent = trackTitle(track);
+  if (track.thumbnail) {
     const image = thumbnail.firstElementChild;
     image.src = track.thumbnail;
     image.hidden = false;
@@ -316,7 +329,7 @@ function renderQueue(anchor = false) {
     }));
     return row;
   });
-  get("history-list").replaceChildren(...historyRows);
+  historyList.replaceChildren(...historyRows);
   get("history-empty").hidden = history.length > 0;
   historyClear.disabled = !history.length;
   const rows = queue.upcoming.map((track) => {
@@ -349,10 +362,10 @@ function renderQueue(anchor = false) {
   queueList.replaceChildren(...rows);
   get("queue-empty").hidden = Boolean(rows.length);
   if (anchor) {
-    historyScroll.touchSide = 0;
-    releaseQueueScroll();
+    resetQueueScroll();
   }
-  queuePanel.scrollTop = anchor ? queueCurrent.offsetTop : scroll;
+  queuePanel.scrollTop = anchor ? queueAnchor() : scroll;
+  updateHistoryHeading();
   scheduleVideoLayout();
 }
 
@@ -364,73 +377,115 @@ historyClear.addEventListener("click", () => {
   queuePanel.scrollTop = 0;
 });
 
+function queueAnchor() {
+  return queueCurrent.offsetTop;
+}
+
 function scrollSide(position) {
-  const difference = position - queueCurrent.offsetTop;
+  const difference = position - queueAnchor();
   return Math.abs(difference) <= 2 ? 0 : Math.sign(difference);
 }
 
-function releaseQueueScroll() {
+function updateHistoryHeading() {
+  historyHeading.hidden = player.dataset.queue !== "true" || scrollSide(queuePanel.scrollTop) >= 0;
+}
+
+function unlockQueueScroll() {
   clearTimeout(queueSettleTimer);
   delete queuePanel.dataset.settling;
 }
 
-function settleAtCurrentTrack(fromTouch = false) {
-  historyScroll.touchSide = 0;
-  const top = queueCurrent.offsetTop;
-  if (fromTouch) {
-    // Stop the phone's existing fling; otherwise it can resume after scrollTo.
-    queuePanel.dataset.settling = "";
-    queuePanel.getBoundingClientRect();
-    queueSettleTimer = setTimeout(releaseQueueScroll, 460);
-  }
-  queuePanel.scrollTo({ top, behavior: reducedMotion.matches ? "auto" : "smooth" });
+function resetQueueScroll() {
+  queueTouch = queueWheel = null;
+  clearTimeout(queueWheelTimer);
+  cancelAnimationFrame(queueSettleFrame);
+  unlockQueueScroll();
 }
 
-function settleAfterTouch() {
-  if (!historyScroll.touchSide || historyScroll.touching || performance.now() > historyScroll.touchUntil) return;
-  const side = scrollSide(queuePanel.scrollTop);
-  if (side !== historyScroll.touchSide) settleAtCurrentTrack(true);
+function settleQueueAt(top, touch = false) {
+  if (touch) {
+    // Cancel the native fling while the correction animates.
+    queuePanel.dataset.settling = "";
+    queuePanel.getBoundingClientRect();
+    clearTimeout(queueSettleTimer);
+    if (!queueTouch?.active) queueSettleTimer = setTimeout(unlockQueueScroll, 420);
+  }
+  cancelAnimationFrame(queueSettleFrame);
+  const from = queuePanel.scrollTop;
+  if (reducedMotion.matches || Math.abs(top - from) <= 2) {
+    queuePanel.scrollTo({ top, behavior: "instant" });
+    return;
+  }
+  const start = performance.now();
+  function animate(now) {
+    const progress = Math.min(1, (now - start) / 230);
+    const eased = 1 - (1 - progress) ** 3;
+    queuePanel.scrollTo({ top: from + (top - from) * eased, behavior: "instant" });
+    if (progress < 1) queueSettleFrame = requestAnimationFrame(animate);
+  }
+  queueSettleFrame = requestAnimationFrame(animate);
+}
+
+function settleHistoryEntry(touch) {
+  const last = historyList.lastElementChild;
+  const anchor = queueAnchor();
+  const threshold = last?.previousElementSibling?.offsetTop ??
+    (last ? last.offsetTop + last.offsetHeight / 2 : anchor / 2);
+  const historyEnd = last ? Math.max(0, last.offsetTop + last.offsetHeight - queuePanel.clientHeight) : 0;
+  const target = queuePanel.scrollTop <= threshold ? historyEnd : anchor;
+  settleQueueAt(target, touch);
 }
 
 queuePanel.addEventListener("scroll", () => {
-  queuePanel.toggleAttribute("data-scrolled", queuePanel.scrollTop > 1);
+  updateHistoryHeading();
   scheduleVideoLayout();
-  settleAfterTouch();
+  const gesture = queueTouch;
+  if (!gesture || gesture.stopped || !gesture.side || (!gesture.active && performance.now() > gesture.until)) return;
+  if (scrollSide(queuePanel.scrollTop) !== gesture.side) {
+    gesture.stopped = true;
+    settleQueueAt(queueAnchor(), true);
+  }
 }, { passive: true });
 queuePanel.addEventListener("touchstart", (event) => {
-  releaseQueueScroll();
-  historyScroll.touching = true;
-  historyScroll.touchSide = event.target.closest(".queue-handle") ? 0 : scrollSide(queuePanel.scrollTop);
+  resetQueueScroll();
+  if (event.touches.length === 1 && !event.target.closest(".queue-handle")) {
+    queueTouch = { active: true, stopped: false, side: scrollSide(queuePanel.scrollTop) };
+  }
 }, { passive: true });
-queuePanel.addEventListener("touchend", (event) => {
-  if (event.touches.length) return;
-  historyScroll.touching = false;
-  historyScroll.touchUntil = performance.now() + 950;
-  settleAfterTouch();
-}, { passive: true });
-queuePanel.addEventListener("touchcancel", () => {
-  historyScroll.touching = false;
-  historyScroll.touchSide = 0;
-}, { passive: true });
+function finishQueueTouch(event) {
+  if (!queueTouch?.active || event.touches.length) return;
+  queueTouch.active = false;
+  queueTouch.until = performance.now() + 1000;
+  if (queueTouch.stopped) queueSettleTimer = setTimeout(unlockQueueScroll, 420);
+  else if (queueTouch.side === 0 && scrollSide(queuePanel.scrollTop) < 0) settleHistoryEntry(true);
+}
+queuePanel.addEventListener("touchend", finishQueueTouch, { passive: true });
+queuePanel.addEventListener("touchcancel", finishQueueTouch, { passive: true });
 queuePanel.addEventListener("wheel", (event) => {
-  releaseQueueScroll();
   if (event.ctrlKey || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
   const now = performance.now();
-  if (now - historyScroll.lastWheel > 140) {
-    historyScroll.wheelSide = scrollSide(queuePanel.scrollTop);
-    historyScroll.wheelStopped = false;
+  if (!queueWheel || now - queueWheel.last > 150) {
+    cancelAnimationFrame(queueSettleFrame);
+    unlockQueueScroll();
+    queueTouch = null;
+    queueWheel = { side: scrollSide(queuePanel.scrollTop), stopped: false };
   }
-  historyScroll.lastWheel = now;
-  if (historyScroll.wheelStopped) {
+  queueWheel.last = now;
+  clearTimeout(queueWheelTimer);
+  if (queueWheel.stopped) {
     event.preventDefault();
     return;
   }
   const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? queuePanel.clientHeight : 1;
   const end = queuePanel.scrollTop + event.deltaY * unit;
-  if (historyScroll.wheelSide && scrollSide(end) !== historyScroll.wheelSide) {
+  if (queueWheel.side && scrollSide(end) !== queueWheel.side) {
     event.preventDefault();
-    historyScroll.wheelStopped = true;
-    settleAtCurrentTrack();
+    queueWheel.stopped = true;
+    settleQueueAt(queueAnchor());
+  } else if (!queueWheel.side) {
+    queueWheelTimer = setTimeout(() => {
+      if (scrollSide(queuePanel.scrollTop) < 0) settleHistoryEntry(false);
+    }, 150);
   }
 }, { passive: false });
 
@@ -441,7 +496,7 @@ function removeQueued(track) {
 }
 
 const cancelQueueGesture = bindQueueGestures(queueList, () => queuePanel, {
-  reorder: (track, index) => { queue.reorder(track, index); renderQueue(); },
+  reorder: (track, index) => { queue.reorder(track, index); renderQueue(); rememberPlayback(true); },
   remove: removeQueued,
 }, reducedMotion);
 
@@ -453,6 +508,8 @@ function showQueue(visible) {
   queuePanel.inert = !visible;
   if (visible) renderQueue(true);
   else {
+    resetQueueScroll();
+    updateHistoryHeading();
     cancelQueueGesture();
     queueThumbnailObserver?.disconnect();
   }
@@ -510,13 +567,16 @@ function updateSelection() {
   updatePlayback();
   updateTime();
   updateMediaMetadata();
+  rememberPlayback(true);
 }
 
 async function play() {
+  playbackTracking = true;
   const request = ++playRequest;
   tellPlayer("");
   try {
     if (media.error) media.load();
+    applyResumePosition();
     await media.play();
     if (request === playRequest) updatePlayback();
   } catch (error) {
@@ -570,6 +630,7 @@ function setBackdrop(image) {
 function clearSource(nextMedia = audio) {
   ++playRequest;
   seekDrag = null;
+  resumePosition = null;
   media.pause();
   if (media === video) {
     if (nextMedia !== video) closeVideoExpanded();
@@ -636,6 +697,17 @@ async function showArtwork(track) {
     artwork.src = artworkUrl;
     await artwork.decode();
     if (request !== artworkRequest) return;
+    if (Math.max(artwork.naturalWidth, artwork.naturalHeight) > 768) {
+      const resized = await encodeCover(artwork).catch(() => null);
+      if (request !== artworkRequest) return;
+      if (resized) {
+        URL.revokeObjectURL(artworkUrl);
+        artworkUrl = URL.createObjectURL(resized);
+        artwork.src = artworkUrl;
+        await artwork.decode();
+        if (request !== artworkRequest) return;
+      }
+    }
     artwork.hidden = false;
     if (isVideo(track)) {
       video.poster = artworkUrl;
@@ -671,23 +743,28 @@ function selectTrack(track, followQueue = false, scope, query = "") {
     queue.start(scope ?? folder?.tracks ?? rootTracks(), track);
   }
   if (current !== track) {
-    const nextMedia = isVideo(track) ? video : audio;
-    clearSource(nextMedia);
-    current = track;
-    media = nextMedia;
-    recordedCurrent = false;
-    objectUrl = URL.createObjectURL(track.blob);
-    media.src = objectUrl;
-    showArtwork(track);
+    loadTrack(track);
   } else if (media.ended || followQueue) {
     recordedCurrent = false;
     media.currentTime = 0;
   }
+  playbackTracking = true;
   tellLibrary("");
   updateSelection();
   play();
 }
 
+function loadTrack(track, position = null) {
+  const nextMedia = isVideo(track) ? video : audio;
+  clearSource(nextMedia);
+  current = track;
+  media = nextMedia;
+  recordedCurrent = false;
+  resumePosition = position;
+  objectUrl = URL.createObjectURL(track.blob);
+  media.src = objectUrl;
+  showArtwork(track);
+}
 function move(offset) {
   if (!current) return false;
   const track = offset < 0 ? queue.back(current) : queue.forward(current);
@@ -764,6 +841,71 @@ function saveHistory() {
   }
 }
 
+function rememberPlayback(updateQueue = false) {
+  if (!playbackTracking) return;
+  try {
+    if (current?.id === undefined || current.busy === "delete") {
+      if (updateQueue) {
+        playbackSnapshot = null;
+        localStorage.removeItem(playbackKey);
+      }
+      return;
+    }
+    if (updateQueue || playbackSnapshot?.id !== current.id) {
+      const ids = (entries) => entries.flatMap((track) => track.id === undefined ? [] : [track.id]);
+      playbackSnapshot = {
+        id: current.id, query: playbackQuery, scope: ids(queue.scope),
+        previous: ids(queue.previous), upcoming: ids(queue.upcoming),
+        shuffled: queue.shuffled, repeat: queue.repeat,
+      };
+    }
+    const position = resumePosition ?? (media.ended || !Number.isFinite(media.currentTime) ? 0 : media.currentTime);
+    localStorage.setItem(playbackKey, JSON.stringify({ ...playbackSnapshot, position, recorded: recordedCurrent }));
+    lastCheckpoint = performance.now();
+  } catch {
+    // A blocked or full browser store must never interrupt playback.
+    lastCheckpoint = performance.now();
+  }
+}
+
+function restorePlayback(saved) {
+  if (current) return;
+  let state;
+  try {
+    state = JSON.parse(localStorage.getItem(playbackKey));
+  } catch {
+    return;
+  }
+  const track = saved.get(state?.id);
+  if (!track) return;
+  const resolve = (ids) => Array.isArray(ids) ? ids.map((id) => saved.get(id)).filter(Boolean) : [];
+  playbackFolder = track.folder ?? null;
+  playbackQuery = typeof state.query === "string" ? state.query : "";
+  queue.shuffled = state.shuffled === true;
+  queue.repeat = state.repeat === true;
+  const scope = resolve(state.scope);
+  if (scope.includes(track)) {
+    queue.scope = scope;
+    queue.previous = resolve(state.previous);
+    queue.upcoming = resolve(state.upcoming);
+  } else {
+    queue.start(playbackFolder?.tracks ?? rootTracks(), track);
+  }
+  loadTrack(track, Number.isFinite(state.position) ? Math.max(0, state.position) : 0);
+  recordedCurrent = state.recorded === true && queue.history.at(-1) === track;
+}
+
+function applyResumePosition() {
+  if (resumePosition === null || !Number.isFinite(media.duration) || media.duration <= 0) return;
+  const position = Math.min(resumePosition, Math.max(0, media.duration - .05));
+  try {
+    if (position !== media.currentTime) media.currentTime = position;
+    resumePosition = null;
+  } catch {
+    // Some browsers defer seeking until the media is ready or playback is requested.
+  }
+}
+
 async function restoreTracks() {
   try {
     const connection = await trackStore.open();
@@ -801,6 +943,7 @@ async function restoreTracks() {
       tracks.unshift(...saved);
       database = connection;
       restoreHistory(saved);
+      restorePlayback(savedById);
     } catch (error) {
       connection.close();
       throw error;
@@ -956,6 +1099,9 @@ async function deleteTracks(entries) {
     clearSource();
     setBackdrop(null);
     current = null;
+    playbackTracking = true;
+    rememberPlayback(true);
+    playbackTracking = false;
     recordedCurrent = false;
     tellPlayer("");
     showView("library");
@@ -1104,20 +1250,24 @@ async function openTrackDetails(track) {
   detailsImage.disabled = Boolean(track.busy);
 }
 
+async function encodeCover(image) {
+  const scale = Math.min(1, 768 / Math.max(image.naturalWidth, image.naturalHeight));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", .87));
+  if (!blob) throw new Error("Artwork encoding failed");
+  return blob;
+}
+
 async function resizeCover(file) {
   const url = URL.createObjectURL(file);
   try {
     const image = new Image();
     image.src = url;
     await image.decode();
-    const scale = Math.min(1, 768 / Math.max(image.naturalWidth, image.naturalHeight));
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
-    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
-    canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", .87));
-    if (!blob) throw new Error("Artwork encoding failed");
-    return blob;
+    return await encodeCover(image);
   } finally {
     URL.revokeObjectURL(url);
   }
@@ -1136,7 +1286,13 @@ function recordPlay(track) {
   }
 }
 
-async function loadTrackPreview(track) {
+function loadTrackPreview(track) {
+  const preview = previewQueue.then(() => tracks.includes(track) ? decodeTrackPreview(track) : undefined);
+  previewQueue = preview;
+  return preview;
+}
+
+async function decodeTrackPreview(track) {
   try {
     const metadata = await readMediaMetadata(track);
     updateTrackMetadata(track, metadata);
@@ -1191,7 +1347,6 @@ function updateTrackRow(row) {
   artist.textContent = trackArtist(track) || trackAlbum(track);
   artist.hidden = !artist.textContent;
   row.querySelector(".more").setAttribute("aria-label", title + "の操作");
-  row.querySelector(".track-delete").setAttribute("aria-label", title + "を削除");
   row.querySelector(".library-handle").setAttribute("aria-label", title + "を並べ替え");
   const image = row.querySelector("img");
   if (track.thumbnail) image.src = track.thumbnail;
@@ -1270,7 +1425,8 @@ function openFolderMenu(folder) {
   menuFolder = folder;
   get("menu-title").textContent = folder.name;
   get("menu-status").textContent = folder.tracks.length + " 曲";
-  showTrackMenuActions("menu-add");
+  get("menu-rename-folder").disabled = !database;
+  showTrackMenuActions("menu-add", "menu-rename-folder");
 }
 
 function openLibraryMenu() {
@@ -1385,19 +1541,13 @@ function renderTracks() {
     more.className = "more";
     more.textContent = "•••";
     more.addEventListener("click", () => openTrackMenu(track));
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "track-delete";
-    remove.disabled = Boolean(track.busy);
-    remove.innerHTML = '<span aria-hidden="true"></span>';
-    remove.addEventListener("click", () => confirmDeletion([track]));
     const handle = document.createElement("button");
     handle.type = "button";
     handle.className = "queue-handle library-handle";
     handle.innerHTML = '<span class="queue-symbol" aria-hidden="true"></span>';
     const actions = document.createElement("div");
     actions.className = "track-actions";
-    actions.append(more, remove, handle);
+    actions.append(more, handle);
     row.append(select, actions);
     updateSelectionRow(row);
     updateTrackRow(row);
@@ -1521,10 +1671,19 @@ deleteMode.addEventListener("click", () => setDeleteMode(!deleting));
 librarySettings.addEventListener("click", openLibraryMenu);
 get("folder-back").addEventListener("click", () => showFolder(null));
 const folderName = get("folder-name");
-newFolder.addEventListener("click", () => {
-  folderName.value = "";
+const folderSubmit = get("folder-submit");
+let folderToRename = null;
+function openFolderEditor(folder = null) {
+  folderToRename = folder;
+  get("folder-create-title").textContent = folder ? "フォルダ名を変更" : "フォルダを作成";
+  folderSubmit.textContent = folder ? "保存" : "作成";
+  folderName.value = folder?.name ?? "";
   folderName.setCustomValidity("");
   createFolderDialog.showModal();
+}
+newFolder.addEventListener("click", () => openFolderEditor());
+createFolderDialog.addEventListener("close", () => {
+  folderToRename = null;
 });
 folderName.addEventListener("input", () => folderName.setCustomValidity(""));
 createFolderDialog.querySelector("form").addEventListener("submit", (event) => {
@@ -1536,7 +1695,8 @@ createFolderDialog.querySelector("form").addEventListener("submit", (event) => {
     folderName.reportValidity();
     return;
   }
-  folders.push({ name, tracks: [] });
+  if (folderToRename) folderToRename.name = name;
+  else folders.push({ name, tracks: [] });
   persistLibrary();
   createFolderDialog.close();
   search.value = "";
@@ -1769,6 +1929,10 @@ get("menu-add").addEventListener("click", () => {
   const folder = menuFolder;
   if (folder) closeTrackMenu(() => setTrackSelection("add", folder));
 });
+get("menu-rename-folder").addEventListener("click", () => {
+  const folder = menuFolder;
+  if (folder) closeTrackMenu(() => openFolderEditor(folder));
+});
 get("menu-move-out").addEventListener("click", () => {
   const track = menuTrack;
   if (!track?.folder || track.busy) return;
@@ -1884,7 +2048,10 @@ toggle.addEventListener("click", () => {
 });
 miniToggle.addEventListener("click", togglePlayback);
 seek.addEventListener("input", () => {
-  if (!seek.disabled) media.currentTime = seek.valueAsNumber;
+  if (!seek.disabled) {
+    playbackTracking = true;
+    media.currentTime = seek.valueAsNumber;
+  }
 });
 
 function previewSeek(event) {
@@ -1915,6 +2082,7 @@ seek.addEventListener("pointerup", (event) => {
   if (seekDrag?.id !== event.pointerId) return;
   previewSeek(event);
   const time = seekDrag.time;
+  playbackTracking = true;
   seekDrag = null;
   media.currentTime = time;
   updateTime();
@@ -1983,7 +2151,7 @@ function updateVideoLayout() {
   let clipTop = 0;
   let clipBottom = 0;
   if (queued) {
-    clipTop = Math.max(0, Math.max(panel.top, historyHeading.getBoundingClientRect().bottom) - target.top);
+    clipTop = Math.max(0, panel.top - target.top);
     clipBottom = Math.max(0, target.bottom - panel.bottom);
   }
   const preview = queued && !video.paused && !video.ended && !video.error && video.readyState >= 2 &&
@@ -2092,7 +2260,6 @@ const videoDoubleTapTime = 350;
 function clearVideoTaps() {
   videoPointer = null;
   previousVideoTap = null;
-  clearTimeout(videoTapTimer);
   clearTimeout(videoSkipTimer);
   videoSkip.removeAttribute("data-direction");
   videoSkip.textContent = "";
@@ -2102,7 +2269,6 @@ videoStage.addEventListener("pointerdown", (event) => {
   if (!event.isPrimary || event.button !== 0) return;
   const seconds = Number(event.target.dataset?.seconds);
   if (seconds) videoPointer = { id: event.pointerId, x: event.clientX, y: event.clientY, seconds };
-  else revealFullscreenControls();
 });
 videoStage.addEventListener("pointercancel", clearVideoTaps);
 videoStage.addEventListener("pointerup", (event) => {
@@ -2111,20 +2277,22 @@ videoStage.addEventListener("pointerup", (event) => {
   if (start?.id !== event.pointerId || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 16) return;
   const time = performance.now();
   const previous = previousVideoTap;
+  const fullscreen = document.body.hasAttribute("data-video-expanded");
   if (!previous || time - previous.time > videoDoubleTapTime || previous.seconds !== start.seconds ||
       Math.hypot(previous.x - start.x, previous.y - start.y) > 80) {
-    previousVideoTap = { ...start, time };
-    if (document.body.hasAttribute("data-video-expanded")) {
-      clearTimeout(videoTapTimer);
-      videoTapTimer = setTimeout(() => {
-        if (document.body.hasAttribute("data-video-controls")) hideFullscreenControls();
-        else revealFullscreenControls();
-      }, videoDoubleTapTime);
+    const controlsVisible = document.body.hasAttribute("data-video-controls");
+    previousVideoTap = { ...start, time, controlsVisible };
+    if (fullscreen) {
+      if (controlsVisible) hideFullscreenControls();
+      else revealFullscreenControls();
     }
     return;
   }
   previousVideoTap = null;
-  clearTimeout(videoTapTimer);
+  if (fullscreen) {
+    if (previous.controlsVisible) revealFullscreenControls();
+    else hideFullscreenControls();
+  }
   if (media !== video || !Number.isFinite(video.duration) || !video.duration) return;
   video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + start.seconds));
   videoSkip.dataset.direction = start.seconds > 0 ? "next" : "previous";
@@ -2146,6 +2314,7 @@ function onActiveMedia(event, handler) {
   }
 }
 
+onActiveMedia("loadedmetadata", applyResumePosition);
 for (const event of ["loadedmetadata", "durationchange", "timeupdate", "seeked"]) {
   onActiveMedia(event, updateTime);
 }
@@ -2153,17 +2322,30 @@ for (const event of ["play", "playing", "pause"]) {
   onActiveMedia(event, updatePlayback);
 }
 onActiveMedia("seeked", updatePlayback);
+onActiveMedia("seeked", () => rememberPlayback());
+onActiveMedia("pause", () => rememberPlayback());
+onActiveMedia("timeupdate", () => {
+  if (!media.paused && performance.now() - lastCheckpoint >= 2000) rememberPlayback();
+});
 onActiveMedia("playing", () => {
-  if (!current || recordedCurrent) return;
+  if (!current) return;
+  if (recordedCurrent) {
+    rememberPlayback();
+    return;
+  }
   recordedCurrent = true;
   recordPlay(current);
   queue.record(current);
   saveHistory();
+  rememberPlayback();
   if (player.dataset.queue === "true") renderQueue(true);
 });
 onActiveMedia("ended", () => {
   if (!media.ended || !current) return;
-  if (!move(1)) updatePlayback();
+  if (!move(1)) {
+    updatePlayback();
+    rememberPlayback();
+  }
 });
 onActiveMedia("error", () => {
   if (!current || !media.error) return;
@@ -2172,6 +2354,10 @@ onActiveMedia("error", () => {
   updateTime();
 });
 
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) rememberPlayback();
+});
+window.addEventListener("pagehide", () => rememberPlayback());
 syncLayout();
 const storageReady = restoreTracks();
 setupMediaDownloads(saveDownloadedMedia);
