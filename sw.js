@@ -2,7 +2,7 @@
 
 const scope = self.registration.scope;
 const cachePrefix = `otodana:${scope}:`;
-const cacheName = `${cachePrefix}v37`;
+const cacheName = `${cachePrefix}v38`;
 const index = new URL("index.html", scope).href;
 const assets = [
   "index.html", "style.css?v=35", "app.js?v=36", "queue.js?v=24", "storage.js?v=27", "artwork.js?v=4", "manifest.webmanifest",
