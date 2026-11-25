@@ -4,28 +4,52 @@
   <meta charset="utf-8">
   <meta name="google" content="notranslate">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta id="theme-color" name="theme-color" content="#000000">
+  <meta id="theme-color" name="theme-color" content="#090d15">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob:; media-src blob:; connect-src 'self' https: http://127.0.0.1:8787/api/; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>音棚 — 音楽・動画プレイヤー</title>
-  <link rel="icon" href="icon-192.png">
-  <link rel="apple-touch-icon" href="icon-192.png">
-  <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="style.css?v=35">
+  <link rel="icon" href="icon-192.png?v=40">
+  <link rel="apple-touch-icon" href="icon-192.png?v=40">
+  <link rel="manifest" href="manifest.webmanifest?v=40">
+  <link rel="stylesheet" href="style.css?v=40.1">
   <script src="storage.js?v=27" defer></script>
   <script src="artwork.js?v=4" defer></script>
   <script src="queue.js?v=24" defer></script>
-  <script src="download.js?v=37" defer></script>
-  <script src="pc-transfer.js?v=35" defer></script>
-  <script src="app.js?v=36" defer></script>
+  <script src="download.js?v=39" defer></script>
+  <script src="pc-transfer.js?v=39" defer></script>
+  <script src="app.js?v=40" defer></script>
 </head>
 <body data-view="library">
+  <svg class="icon-definitions" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="icon-add-music" viewBox="0 0 24 24">
+      <path d="M10 17V5l8-2v6l-8 2m8 3v7m-3.5-3.5h7"/><ellipse cx="7" cy="17.5" rx="3" ry="2.5"/>
+    </symbol>
+    <symbol id="icon-pencil" viewBox="0 0 24 24">
+      <path d="m4 20 1-5L16.5 3.5a1.6 1.6 0 0 1 2.3 0l1.7 1.7a1.6 1.6 0 0 1 0 2.3L9 19l-5 1Zm10.5-14.5 4 4"/>
+    </symbol>
+    <symbol id="icon-file" viewBox="0 0 24 24">
+      <path d="M7 3h7l5 5v12a1 1 0 0 1-1 1H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm7 0v5h5M9 13h6m-6 4h6"/>
+    </symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24">
+      <path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/>
+    </symbol>
+    <symbol id="icon-sync" viewBox="0 0 24 24">
+      <path d="M3 8h17m-4-4 4 4-4 4m5 4H4m4-4-4 4 4 4"/>
+    </symbol>
+    <symbol id="icon-queue" viewBox="0 0 24 24">
+      <path d="M8 5h12M8 12h12M8 19h12M4 5h.1M4 12h.1M4 19h.1"/>
+    </symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24">
+      <path d="M4 7h16m-11 0V4h6v3m-9 0 1 13h10l1-13m-8 4v5m4-5v5"/>
+    </symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+  </svg>
   <main class="layout">
     <section id="library" aria-labelledby="library-title">
       <div class="library-heading">
         <button type="button" id="folder-back" hidden>‹ ライブラリ</button>
         <div class="library-title-row">
           <h1 id="library-title" tabindex="-1">ライブラリ</h1>
-          <span id="app-version" aria-label="バージョン38">v38</span>
+          <span id="app-version" aria-label="バージョン40">v40</span>
         </div>
         <div class="library-summary">
           <span id="track-count">0 曲</span>
@@ -44,14 +68,12 @@
           <input id="search" type="search" placeholder="曲名・アーティストで検索" aria-label="曲名・アーティストで検索" autocomplete="off">
         </label>
         <div id="folder-selection" class="dialog-actions" hidden>
-          <button type="button" id="selection-cancel">キャンセル</button>
-          <button type="button" id="selection-confirm" value="confirm" disabled>確定</button>
+          <button type="button" id="selection-cancel" class="action action-text">キャンセル</button>
+          <button type="button" id="selection-confirm" class="action action-primary" value="confirm" disabled>確定</button>
         </div>
         <div class="library-actions">
           <button type="button" id="add-tracks" class="library-icon" aria-label="曲を追加" aria-haspopup="dialog" aria-controls="add-dialog">
-            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <path d="M13 3v12.2a4.4 4.4 0 0 0-2-.45c-2.65 0-4.8 1.6-4.8 3.58 0 1.66 1.44 2.67 3.37 2.67 2.6 0 4.93-1.54 4.93-4.12V7.3c.76 1.06 1.91 1.94 3.64 2.71v-2.2C16.02 6.71 14.9 5.08 14.5 3Z"/>
-            </svg>
+            <svg class="ui-icon" aria-hidden="true"><use href="#icon-add-music"/></svg>
           </button>
           <button type="button" id="new-folder" class="library-icon" aria-label="フォルダを作成" disabled>
             <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -59,10 +81,7 @@
             </svg>
           </button>
           <button type="button" id="delete-mode" class="library-icon" aria-label="曲を編集" aria-pressed="false" disabled>
-            <svg class="edit-pencil" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m6.1 15.4-2.7 5.2 5.3-2.5L20 6.8l-2.7-2.7L6.1 15.4Z" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linejoin="round"/>
-              <path d="m4 20 1.9-3.6 1.7 1.7L4 20Zm13.2-16 1.2-1.2a1.95 1.95 0 0 1 2.75 2.75L20 6.8 17.2 4Z" fill="currentColor"/>
-            </svg>
+            <svg class="ui-icon edit-pencil" aria-hidden="true"><use href="#icon-pencil"/></svg>
             <svg class="edit-done" viewBox="0 0 24 24" aria-hidden="true">
               <path d="m5 12 4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
@@ -90,7 +109,7 @@
           <div id="artwork-stage">
             <div class="cover-space">
               <div class="cover" id="player-cover">
-                <div class="cover-pattern" aria-hidden="true"><span>♫</span></div>
+                <div class="cover-pattern" aria-hidden="true"></div>
                 <img id="artwork" alt="" hidden>
               </div>
             </div>
@@ -140,7 +159,7 @@
         </div>
         <div class="player-foot">
           <div class="player-tools">
-            <button type="button" id="queue-toggle" class="player-actions" aria-label="次に再生する曲を表示" aria-controls="queue-panel" aria-pressed="false" hidden><span class="queue-symbol" aria-hidden="true"></span></button>
+            <button type="button" id="queue-toggle" class="player-actions" aria-label="次に再生する曲を表示" aria-controls="queue-panel" aria-pressed="false" hidden><svg class="ui-icon" aria-hidden="true"><use href="#icon-queue"/></svg><span>再生リスト</span></button>
             <button id="video-fullscreen" class="player-actions" type="button" aria-label="動画を全画面" hidden disabled>
               <svg class="video-expand-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5m6 0h5v5m0 6v5h-5m-6 0H4v-5"/></svg>
               <svg class="video-shrink-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h5V4m6 0v5h5m0 6h-5v5m-6 0v-5H4"/></svg>
@@ -171,38 +190,55 @@
   <dialog id="add-dialog" class="folder-dialog" aria-labelledby="add-title">
     <div class="menu-heading">
       <h2 id="add-title">曲を追加</h2>
-      <form method="dialog"><button type="submit" class="library-icon" aria-label="閉じる">×</button></form>
+      <form method="dialog"><button type="submit" class="library-icon" aria-label="閉じる"><svg class="ui-icon" aria-hidden="true"><use href="#icon-close"/></svg></button></form>
     </div>
     <div class="add-options">
-      <label class="import">端末のファイルを選ぶ
+      <label class="import action action-primary"><svg class="ui-icon" aria-hidden="true"><use href="#icon-file"/></svg>端末のファイルを選ぶ
         <input id="file-picker" type="file" accept=".mp3,.mp4,.m4v,.mov,.webm,audio/mpeg,video/mp4,video/quicktime,video/webm" multiple aria-label="端末のファイルを選ぶ" autofocus>
       </label>
-      <button type="button" id="download-open" class="import">ダウンロード</button>
-      <button type="button" id="pc-transfer-open" class="import">ほか端末と同期する</button>
+      <button type="button" id="download-open" class="import action action-secondary"><svg class="ui-icon" aria-hidden="true"><use href="#icon-download"/></svg>ダウンロード</button>
+      <button type="button" id="pc-transfer-open" class="import action action-secondary"><svg class="ui-icon" aria-hidden="true"><use href="#icon-sync"/></svg>ほか端末と同期する</button>
     </div>
   </dialog>
 
   <dialog id="download-dialog" class="folder-dialog" aria-labelledby="download-title">
     <div class="menu-heading">
       <h2 id="download-title">動画リンクから保存</h2>
-      <button type="button" id="download-close" aria-label="閉じる" autofocus>×</button>
+      <button type="button" id="download-close" class="library-icon" aria-label="閉じる" autofocus><svg class="ui-icon" aria-hidden="true"><use href="#icon-close"/></svg></button>
     </div>
-    <a class="youtube-link" href="https://www.youtube.com/" target="_blank" rel="noopener" aria-label="YouTubeを開く">
-      <svg viewBox="0 0 32 22" aria-hidden="true">
-        <rect width="32" height="22" rx="6" fill="#ff0033"/>
-        <path d="m13 6 9 5-9 5Z" fill="#fff"/>
-      </svg>
-    </a>
-    <label for="download-url">動画の共有リンク</label>
-    <input id="download-url" type="url" inputmode="url" placeholder="https://" autocapitalize="off" autocomplete="off" spellcheck="false">
-    <div id="download-options" class="dialog-actions">
-      <button type="button" value="mp4">MP4で保存</button>
-      <button type="button" value="mp3">MP3で保存</button>
-      <label id="download-pc-option" class="skip-download-estimate" hidden><input type="checkbox" id="download-pc-local">このPCから直接取得</label>
-      <label class="skip-download-estimate"><input type="checkbox" id="download-skip-estimate">容量確認を省いて保存</label>
+    <div id="download-options">
+      <a class="youtube-link" href="https://www.youtube.com/" target="_blank" rel="noopener" aria-label="YouTubeを開く">
+        <svg viewBox="0 0 32 22" aria-hidden="true">
+          <rect width="32" height="22" rx="6" fill="#ff0033"/>
+          <path d="m13 6 9 5-9 5Z" fill="#fff"/>
+        </svg>
+      </a>
+      <div class="download-toggles">
+        <label id="download-pc-option" hidden><input type="checkbox" id="download-pc-local">PCから直接取得</label>
+        <label><input type="checkbox" id="download-skip-estimate">容量確認を省略</label>
+      </div>
+    </div>
+    <ol id="download-rows" aria-label="ダウンロード一覧"></ol>
+    <template id="download-row-template">
+      <li class="download-row download-grid">
+        <span class="download-number" aria-hidden="true"></span>
+        <input class="download-url" type="url" inputmode="url" placeholder="https://" autocapitalize="off" autocomplete="off" spellcheck="false">
+        <span class="download-thumbnail"><img alt="動画のサムネイル" hidden><span aria-hidden="true">—</span></span>
+        <div class="download-format" role="group">
+          <label><input type="radio" value="mp4" checked><span>MP4</span></label>
+          <label><input type="radio" value="mp3"><span>MP3</span></label>
+        </div>
+        <div class="download-row-info" hidden>
+          <span class="download-row-status"></span>
+          <progress class="download-row-progress" max="100" hidden></progress>
+        </div>
+      </li>
+    </template>
+    <div class="dialog-actions">
+      <button type="button" id="download-start" class="action action-primary" disabled>全件の容量を確認</button>
     </div>
     <section id="download-estimate" aria-labelledby="download-estimate-title" hidden>
-      <h3 id="download-estimate-title"></h3>
+      <h3 id="download-estimate-title">容量の確認結果</h3>
       <dl>
         <dt>配信元から取得する合計</dt>
         <dd id="download-estimate-source"></dd>
@@ -211,20 +247,20 @@
       </dl>
       <p id="download-estimate-note" class="feedback" hidden></p>
       <div class="dialog-actions">
-        <button type="button" id="download-estimate-back">戻る</button>
-        <button type="button" id="download-confirm">保存を開始</button>
+        <button type="button" id="download-estimate-back" class="action action-text">戻る</button>
+        <button type="button" id="download-confirm" class="action action-primary">一括保存を開始</button>
       </div>
     </section>
     <button type="button" id="download-settings" class="connection-settings" aria-haspopup="dialog" aria-controls="download-config">取得サーバーの設定 <span aria-hidden="true">›</span></button>
     <progress id="download-progress" max="100" aria-label="保存の進み具合" hidden></progress>
     <p id="download-message" class="feedback" role="status"></p>
-    <button type="button" id="download-cancel" hidden>中止</button>
+    <button type="button" id="download-cancel" class="action action-secondary" hidden>中止</button>
   </dialog>
 
   <dialog id="pc-transfer-dialog" class="folder-dialog" aria-labelledby="pc-transfer-title">
     <div class="menu-heading">
       <h2 id="pc-transfer-title">ほか端末と同期する</h2>
-      <form method="dialog"><button type="submit" class="library-icon" aria-label="閉じる">×</button></form>
+      <form method="dialog"><button type="submit" class="library-icon" aria-label="閉じる"><svg class="ui-icon" aria-hidden="true"><use href="#icon-close"/></svg></button></form>
     </div>
     <p class="feedback">両方の端末を同じWi-Fiにつないでください。</p>
     <div class="dialog-actions" id="pc-transfer-modes">
@@ -237,25 +273,36 @@
         <input id="pc-transfer-code" type="text" dir="ltr" readonly>
         <p class="feedback">転送が終わるまで、両方の端末でこの画面を開いてください。</p>
       </div>
-      <p id="pc-transfer-selection" class="feedback">送るファイルを選んでください。1件128 MBまで。</p>
-      <div id="pc-transfer-tracks" aria-label="送るファイル"></div>
-      <button type="button" class="pc-transfer-primary" id="pc-transfer-create" disabled>転送コードを表示</button>
+      <div id="pc-transfer-choices">
+        <p id="pc-transfer-selection" class="feedback">送るファイルを選んでください。1件128 MBまで。</p>
+        <div id="pc-transfer-folder-heading" hidden>
+          <button type="button" id="pc-transfer-folder-back">‹ ライブラリ</button>
+          <h3 id="pc-transfer-folder-name"></h3>
+        </div>
+        <div class="pc-transfer-bulk">
+          <button type="button" id="pc-transfer-select-all" class="action action-secondary" disabled>すべて選択</button>
+          <button type="button" id="pc-transfer-clear-all" class="action action-text" disabled>すべて解除</button>
+          <span id="pc-transfer-count" role="status"></span>
+        </div>
+        <div id="pc-transfer-tracks" role="group" aria-label="送るファイル"></div>
+        <button type="button" class="pc-transfer-primary action action-primary" id="pc-transfer-create" disabled>転送コードを表示</button>
+      </div>
     </div>
     <div id="pc-transfer-receiver" class="pc-transfer-panel">
       <label for="pc-transfer-input">送る端末に表示された転送コード</label>
       <input id="pc-transfer-input" type="text" placeholder="例 a7k3" maxlength="16" autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false">
-      <button type="button" class="pc-transfer-primary" id="pc-transfer-connect" disabled>受け取りを開始</button>
+      <button type="button" class="pc-transfer-primary action action-primary" id="pc-transfer-connect" disabled>受け取りを開始</button>
     </div>
     <progress id="pc-transfer-progress" max="100" aria-label="転送の進み具合" hidden></progress>
     <p id="pc-transfer-status" class="feedback" role="status"></p>
     <button type="button" id="pc-transfer-settings" class="connection-settings" aria-haspopup="dialog" aria-controls="download-config">取得サーバーの設定 <span aria-hidden="true">›</span></button>
-    <button type="button" id="pc-transfer-cancel" hidden>中止</button>
+    <button type="button" id="pc-transfer-cancel" class="action action-secondary" hidden>中止</button>
   </dialog>
 
   <dialog id="download-config" class="folder-dialog" aria-labelledby="download-config-title">
     <div class="menu-heading">
       <h2 id="download-config-title">取得サーバーの設定</h2>
-      <button type="button" id="download-config-close" aria-label="設定を閉じる" autofocus>×</button>
+      <button type="button" id="download-config-close" class="library-icon" aria-label="設定を閉じる" autofocus><svg class="ui-icon" aria-hidden="true"><use href="#icon-close"/></svg></button>
     </div>
     <div class="download-config-fields">
       <label for="download-server">取得サーバーのURL</label>
@@ -263,8 +310,8 @@
       <label for="download-token">接続キー</label>
       <input id="download-token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
       <div class="dialog-actions">
-        <button type="button" id="download-config-save" value="confirm">接続先を保存</button>
-        <button type="button" id="download-check">接続を確認</button>
+        <button type="button" id="download-config-save" class="action action-primary" value="confirm">接続先を保存</button>
+        <button type="button" id="download-check" class="action action-secondary">接続を確認</button>
       </div>
       <progress id="download-config-progress" aria-label="接続確認の進み具合" hidden></progress>
       <p id="download-config-message" class="feedback" role="status"></p>
@@ -277,24 +324,24 @@
   </dialog>
 
   <dialog id="track-menu" aria-labelledby="menu-title">
-    <div class="menu-heading"><h2 id="menu-title"></h2><button type="button" id="menu-close" aria-label="閉じる">×</button></div>
+    <div class="menu-heading"><h2 id="menu-title"></h2><button type="button" id="menu-close" class="library-icon" aria-label="閉じる"><svg class="ui-icon" aria-hidden="true"><use href="#icon-close"/></svg></button></div>
     <p id="menu-status"></p>
     <button type="button" id="menu-add" class="save" hidden><span aria-hidden="true">＋</span> フォルダへ一括追加</button>
     <button type="button" id="menu-rename-folder" class="save" hidden>フォルダ名を変更</button>
     <button type="button" id="menu-move-out" class="save" hidden>フォルダから出す</button>
     <button type="button" id="menu-bulk-out" class="save" hidden>フォルダから一括で出す</button>
-    <button type="button" id="menu-bulk-delete" class="delete" hidden>一括削除</button>
+    <button type="button" id="menu-bulk-delete" class="delete" hidden><svg class="ui-icon" aria-hidden="true"><use href="#icon-trash"/></svg>一括削除</button>
     <button type="button" id="menu-details" class="save" hidden>曲の情報・編集</button>
-    <button type="button" id="menu-save" class="save"><span aria-hidden="true">↓</span> 端末に保存</button>
-    <button type="button" id="menu-delete" class="delete"><span aria-hidden="true">−</span> 音棚から削除</button>
+    <button type="button" id="menu-save" class="save"><svg class="ui-icon" aria-hidden="true"><use href="#icon-download"/></svg>端末に保存</button>
+    <button type="button" id="menu-delete" class="delete"><svg class="ui-icon" aria-hidden="true"><use href="#icon-trash"/></svg>音棚から削除</button>
   </dialog>
   <dialog id="track-details" class="folder-dialog" aria-labelledby="details-title">
     <h2 id="details-title">曲の情報・編集</h2>
     <div class="details-artwork">
       <span class="thumb" aria-hidden="true"><img id="details-artwork" alt="" hidden></span>
       <div>
-        <label class="import">ジャケットを選ぶ<input id="details-image" type="file" accept="image/*" aria-label="ジャケットを選ぶ"></label>
-        <button type="button" id="details-reset-cover">元のジャケットに戻す</button>
+        <label class="import action action-secondary">ジャケットを選ぶ<input id="details-image" type="file" accept="image/*" aria-label="ジャケットを選ぶ"></label>
+        <button type="button" id="details-reset-cover" class="action action-text">元のジャケットに戻す</button>
       </div>
     </div>
     <form method="dialog" id="details-form">
@@ -311,8 +358,8 @@
       </dl>
       <p id="details-message" class="feedback" role="status"></p>
       <div class="dialog-actions">
-        <button type="button" id="details-cancel">閉じる</button>
-        <button id="details-save" value="confirm">保存</button>
+        <button type="button" id="details-cancel" class="action action-text">閉じる</button>
+        <button id="details-save" class="action action-primary" value="confirm">保存</button>
       </div>
     </form>
   </dialog>
@@ -320,8 +367,8 @@
     <h2 id="delete-title">削除しますか？</h2>
     <p id="delete-song"></p>
     <form method="dialog">
-      <button value="cancel" autofocus>キャンセル</button>
-      <button value="delete">削除</button>
+      <button class="action action-text" value="cancel" autofocus>キャンセル</button>
+      <button class="action action-danger" value="delete">削除</button>
     </form>
   </dialog>
   <dialog id="folder-create" class="folder-dialog" aria-labelledby="folder-create-title">
@@ -330,8 +377,8 @@
       <label for="folder-name">フォルダ名</label>
       <input id="folder-name" required maxlength="80" autofocus>
       <div class="dialog-actions">
-        <button value="cancel" formnovalidate>キャンセル</button>
-        <button id="folder-submit" value="confirm">作成</button>
+        <button class="action action-text" value="cancel" formnovalidate>キャンセル</button>
+        <button id="folder-submit" class="action action-primary" value="confirm">作成</button>
       </div>
     </form>
   </dialog>

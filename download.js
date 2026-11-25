@@ -312,28 +312,180 @@ function setupDownloadSettings() {
   });
 }
 
+function youtubePreviewUrl(value) {
+  let url;
+  try { url = new URL(value); } catch { return null; }
+  if (url.protocol !== "https:" || url.port || url.username || url.password) return null;
+
+  let id;
+  if (url.hostname === "youtu.be") {
+    id = url.pathname.match(/^\/([\w-]{11})\/?$/)?.[1];
+  } else if (["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"].includes(url.hostname)) {
+    id = url.pathname === "/watch" ? url.searchParams.get("v")
+      : url.pathname.match(/^\/(?:shorts|live)\/([\w-]{11})\/?$/)?.[1];
+  }
+  return id && /^[\w-]{11}$/.test(id) ? "https://i.ytimg.com/vi/" + id + "/mqdefault.jpg" : null;
+}
+
+async function estimateDownload(item, request) {
+  const response = await request("/api/downloads/estimate", {
+    method: "POST", body: { url: item.url, format: item.format }, expectedStatuses: [422, 504],
+  });
+  const estimate = await response.json().catch(() => null);
+  if (response.ok && typeof estimate?.title === "string") return estimate;
+  if (!response.ok && (estimate?.code === "estimate_unavailable" ||
+    (response.status === 504 && estimate?.message === "容量の確認に時間がかかりすぎました。") ||
+    (response.status === 422 && estimate?.message === "配信元から取得または変換できませんでした。時間をおいて試してください。"))) {
+    return null;
+  }
+  throw new Error(typeof estimate?.message === "string" ? estimate.message : "動画の容量を確認できませんでした。");
+}
+
+function summarizeDownloadSize(items, field) {
+  const known = items.filter((item) => Number.isFinite(item.estimate?.[field]));
+  if (!known.length) return "確認できません";
+  const bytes = known.reduce((total, item) => total + item.estimate[field], 0);
+  const approximate = field === "savedBytes" || known.some((item) => item.estimate.approximate);
+  const unknown = items.length - known.length;
+  return (approximate ? "約 " : "") + displayDownloadSize(bytes)
+    + (unknown ? " ＋ " + unknown + "件は不明" : "");
+}
+
 function setupMediaDownloads(saveMedia) {
   setupDownloadSettings();
   const find = (id) => document.getElementById(id);
   const dialog = find("download-dialog");
-  const urlField = find("download-url");
+  const list = find("download-rows");
+  const template = find("download-row-template");
   const settingsButton = find("download-settings");
   const skipEstimate = find("download-skip-estimate");
   const pcLocal = find("download-pc-local");
   const onWindows = location.origin === pcDownloadOrigin || /^Win/i.test(navigator.userAgentData?.platform ?? navigator.platform);
   find("download-pc-option").hidden = !onWindows;
   pcLocal.checked = onWindows;
-  const menu = find("download-options");
   const progress = find("download-progress");
   const estimatePanel = find("download-estimate");
   const estimateNote = find("download-estimate-note");
+  const start = find("download-start");
   const confirm = find("download-confirm");
   const message = find("download-message");
   const cancel = find("download-cancel");
   const close = find("download-close");
-  const formats = Array.from(menu.querySelectorAll("button"));
+  const rows = [];
+  let nextRowId = 0;
   let job;
-  let checkedDownload;
+  let approval;
+
+  function setRowState(row, state = "", text = "", active = false, percent) {
+    row.element.dataset.state = state;
+    row.info.hidden = !text;
+    row.status.textContent = text;
+    row.progress.hidden = !active;
+    if (Number.isFinite(percent)) row.progress.value = percent;
+    else row.progress.removeAttribute("value");
+  }
+
+  function clearPreview(row) {
+    row.preview?.abort();
+    if (row.image.src.startsWith("blob:")) URL.revokeObjectURL(row.image.src);
+    row.image.hidden = true;
+    row.image.removeAttribute("src");
+  }
+
+  function updatePreview(row) {
+    const url = youtubePreviewUrl(row.input.value.trim());
+    if (url === row.previewUrl) return;
+    row.previewUrl = url;
+    clearPreview(row);
+    row.cover = null;
+    if (!url) return;
+    const controller = new AbortController();
+    row.preview = controller;
+    row.cover = (async () => {
+      try {
+        const response = await fetch(url, {
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]),
+          credentials: "omit", referrerPolicy: "no-referrer",
+        });
+        if (!response.ok || response.headers.get("Content-Type")?.split(";")[0] !== "image/jpeg") return null;
+        const cover = await response.blob();
+        if (controller.signal.aborted || !cover.size || cover.size > 2_000_000) return null;
+        row.image.src = URL.createObjectURL(cover);
+        row.image.hidden = false;
+        return cover;
+      } catch {
+        return null;
+      }
+    })();
+  }
+
+  function numberRows() {
+    rows.forEach((row, index) => {
+      const number = index + 1;
+      row.number = number;
+      row.element.querySelector(".download-number").textContent = number;
+      row.input.setAttribute("aria-label", number + "件目の動画の共有リンク");
+      row.element.querySelector(".download-format").setAttribute("aria-label", number + "件目の保存形式");
+      row.progress.setAttribute("aria-label", number + "件目の進み具合");
+    });
+  }
+
+  function removeRow(row) {
+    clearPreview(row);
+    row.element.remove();
+    rows.splice(rows.indexOf(row), 1);
+  }
+
+  function ensureBlankRow() {
+    if (rows.length && !rows.at(-1).input.value.trim()) return;
+    const element = template.content.firstElementChild.cloneNode(true);
+    const query = (selector) => element.querySelector(selector);
+    const row = {
+      element,
+      input: query(".download-url"),
+      image: query("img"),
+      formats: Array.from(element.querySelectorAll('input[type="radio"]')),
+      info: query(".download-row-info"),
+      status: query(".download-row-status"),
+      progress: query(".download-row-progress"),
+      previewUrl: null,
+    };
+    const group = "download-format-" + (++nextRowId);
+    for (const format of row.formats) {
+      format.name = group;
+      format.addEventListener("change", () => setRowState(row));
+    }
+    row.input.addEventListener("input", () => {
+      setRowState(row);
+      updatePreview(row);
+      ensureBlankRow();
+      updateControls();
+    });
+    row.input.addEventListener("blur", () => {
+      if (job || approval || row === rows.at(-1) || row.input.value.trim()) return;
+      removeRow(row);
+      numberRows();
+      updateControls();
+    });
+    rows.push(row);
+    list.append(element);
+    numberRows();
+  }
+
+  function updateControls() {
+    const locked = Boolean(job || approval);
+    for (const element of [settingsButton, skipEstimate, pcLocal]) element.disabled = locked;
+    for (const row of rows) {
+      row.input.disabled = locked;
+      for (const format of row.formats) format.disabled = locked || row.saved;
+    }
+    estimatePanel.hidden = !approval;
+    start.hidden = Boolean(approval);
+    start.disabled = locked || !rows.some((row) => !row.saved && row.input.value.trim());
+    start.textContent = skipEstimate.checked ? "一括保存を開始" : "全件の容量を確認";
+    confirm.disabled = Boolean(job);
+    cancel.hidden = !job;
+  }
 
   function showProgress(text, percent) {
     progress.hidden = false;
@@ -342,124 +494,185 @@ function setupMediaDownloads(saveMedia) {
     message.textContent = text;
   }
 
-  function clearFeedback() {
-    progress.hidden = true;
-    estimatePanel.hidden = true;
-    menu.hidden = false;
-    checkedDownload = null;
+  function showEstimate(items, direct, excluded) {
+    approval = { items, direct, excluded };
+    find("download-estimate-source").textContent = summarizeDownloadSize(items, "sourceBytes");
+    find("download-estimate-output").textContent = summarizeDownloadSize(items, "savedBytes");
+    const unknown = items.filter((item) => !Number.isFinite(item.estimate?.savedBytes)).length;
+    const notes = [];
+    if (unknown) notes.push(unknown + "件の保存容量は変換後に確定します。上限は1件 " + displayDownloadSize(downloadLimit) + "です。");
+    if (excluded) notes.push("エラーの " + excluded + "件は今回の保存対象から外れます。");
+    estimateNote.hidden = !notes.length;
+    estimateNote.textContent = notes.join(" ");
+    confirm.textContent = items.length + "件の一括保存を開始";
+  }
+
+  function rowBatch() {
+    const items = [];
+    let excluded = 0;
+    for (const row of rows) {
+      const value = row.input.value.trim();
+      if (row.saved || !value) continue;
+      let url;
+      try { url = new URL(value); } catch { /* Invalid rows stay editable. */ }
+      if (!url || url.protocol !== "https:" || url.port || url.username || url.password) {
+        setRowState(row, "error", "動画のHTTPSリンクを入力してください。");
+        excluded++;
+        continue;
+      }
+      setRowState(row);
+      items.push({ row, url: url.href, format: row.formats.find((format) => format.checked).value });
+    }
+    return { items, excluded };
+  }
+
+  async function requestFor(direct, signal) {
+    if (direct) showProgress("PCの取得機能に接続しています…");
+    const connection = direct ? await readPCDownloadConnection(signal) : readDownloadConnection();
+    return createDownloadRequest(connection, signal, showProgress);
+  }
+
+  async function checkBatch(items, direct, excluded, request, signal) {
+    const eligible = [];
+    for (const [index, item] of items.entries()) {
+      signal.throwIfAborted();
+      const { row } = item;
+      showProgress((index + 1) + " / " + items.length + " 件の容量を確認しています…", index / items.length * 100);
+      setRowState(row, "", "容量を確認中…", true);
+      try {
+        item.estimate = await estimateDownload(item, request);
+        signal.throwIfAborted();
+        const { title, sourceBytes, savedBytes, maxSavedBytes, approximate } = item.estimate ?? {};
+        const max = maxSavedBytes ?? downloadLimit;
+        if (Number.isFinite(savedBytes) && savedBytes > max) {
+          throw new Error("保存容量が上限 " + displayDownloadSize(max) + " を超えています。");
+        }
+        const source = Number.isFinite(sourceBytes) ? (approximate ? "約 " : "") + displayDownloadSize(sourceBytes) : "不明";
+        const saved = Number.isFinite(savedBytes) ? "約 " + displayDownloadSize(savedBytes) : "変換後に確定";
+        setRowState(row, "", (title ? title + " ／ " : "") + "取得 " + source + " · 保存 " + saved);
+        eligible.push(item);
+      } catch (error) {
+        setRowState(row, "error", signal.aborted ? "容量確認を中止しました。" : error.message);
+        if (signal.aborted || error instanceof DownloadConnectionError) throw error;
+        excluded++;
+      }
+    }
+    if (!eligible.length) {
+      message.textContent = "容量を確認できる項目がありません。各行の表示を確認してください。";
+      return;
+    }
     message.textContent = "";
+    showEstimate(eligible, direct, excluded);
   }
 
-  function showEstimate(estimate, input) {
-    const unavailable = estimate === null;
-    const max = Number.isFinite(estimate?.maxSavedBytes) ? estimate.maxSavedBytes : downloadLimit;
-    find("download-estimate-title").textContent = estimate?.title ?? "容量を確認できませんでした";
-    find("download-estimate-source").textContent = Number.isFinite(estimate?.sourceBytes)
-      ? (estimate.approximate ? "約 " : "") + displayDownloadSize(estimate.sourceBytes)
-      : "確認できません";
-    find("download-estimate-output").textContent = Number.isFinite(estimate?.savedBytes)
-      ? "約 " + displayDownloadSize(estimate.savedBytes) + "（上限 " + displayDownloadSize(max) + "）"
-      : "変換後に確定（上限 " + displayDownloadSize(max) + "）";
-    estimateNote.hidden = !unavailable;
-    estimateNote.textContent = unavailable ? "容量が不明なまま進むか、戻って別の形式を選べます。" : "";
-    confirm.textContent = input.format.toUpperCase() + (unavailable ? "の保存へ進む" : "で保存を開始");
-    clearFeedback();
-    checkedDownload = input;
-    menu.hidden = true;
-    estimatePanel.hidden = false;
-    confirm.focus();
+  async function saveBatch(items, excluded, request, signal) {
+    let saved = 0;
+    let failed = excluded;
+    for (const [index, item] of items.entries()) {
+      signal.throwIfAborted();
+      const { row, url, format } = item;
+      showProgress((index + 1) + " / " + items.length + " 件を処理しています…", index / items.length * 100);
+      try {
+        const input = await downloadVideoPage(url, format, request, signal,
+          (text, percent) => setRowState(row, "", text, true, percent));
+        const cover = await row.cover;
+        signal.throwIfAborted();
+        setRowState(row, "", "ライブラリに保存しています…", true);
+        cancel.disabled = close.disabled = true;
+        const name = (input.name ?? "").replace(/\.[a-z0-9]{1,6}$/i, "")
+          .replace(/[\\/:*?"<>|\p{Cc}]+/gu, " ").trim();
+        await saveMedia(input.blob, (name.slice(0, 180) || "ダウンロード") + "." + format, format, cover);
+        row.saved = row.input.readOnly = true;
+        saved++;
+        setRowState(row, "saved", "端末に保存しました · " + displayDownloadSize(input.blob.size));
+      } catch (error) {
+        setRowState(row, "error", signal.aborted ? "保存を中止しました。" : error.message);
+        if (signal.aborted || error instanceof DownloadConnectionError) throw error;
+        failed++;
+      } finally {
+        cancel.disabled = close.disabled = false;
+      }
+    }
+    message.textContent = saved + "件を端末に保存しました。" + (failed ? "未保存 " + failed + "件" : "");
   }
-
-  function toggleRunning(running) {
-    for (const element of [urlField, settingsButton, skipEstimate, pcLocal, ...formats]) element.disabled = running;
-    cancel.hidden = !running;
-    cancel.disabled = close.disabled = false;
-  }
-
-  find("download-open").addEventListener("click", () => {
-    if (dialog.open) return;
-    find("add-dialog").close();
-    clearFeedback();
-    dialog.showModal();
-  });
-  close.addEventListener("click", () => {
-    if (job) job.abort();
-    dialog.close();
-  });
-  dialog.addEventListener("cancel", (event) => {
-    if (close.disabled) event.preventDefault();
-    else job?.abort();
-  });
-  cancel.addEventListener("click", () => job?.abort());
-  urlField.addEventListener("input", clearFeedback);
-  find("download-estimate-back").addEventListener("click", () => {
-    clearFeedback();
-    formats[0].focus();
-  });
-  confirm.addEventListener("click", () => {
-    if (checkedDownload) run(checkedDownload.format, checkedDownload);
-  });
 
   async function runTask(operation) {
     if (job) return;
-    clearFeedback();
     const controller = new AbortController();
     job = controller;
     const { signal } = controller;
-    toggleRunning(true);
+    updateControls();
+    message.textContent = "";
     try {
       if (!/^https?:$/.test(location.protocol)) {
         throw new Error("この機能はGitHub Pagesの公開ページか、Windowsのローカルサーバーで使えます。");
       }
       await operation(signal);
     } catch (error) {
-      progress.hidden = true;
-      message.textContent = signal.aborted ? "中止しました。" : error.message;
+      message.textContent = signal.aborted ? "処理を中止しました。保存済みの項目はライブラリに残ります。" : error.message;
     } finally {
       job = null;
-      toggleRunning(false);
+      progress.hidden = true;
+      updateControls();
+      if (dialog.open && approval) confirm.focus();
     }
   }
 
-  function run(format, approved) {
-    return runTask(async (signal) => {
-      const url = approved?.url ?? urlField.value.trim();
-      if (!url) throw new Error("YouTubeまたはニコニコ動画の共有リンクを入力してください。");
-      const direct = approved?.direct ?? pcLocal.checked;
-      if (direct) showProgress("PCの取得機能に接続しています…");
-      const connection = direct ? await readPCDownloadConnection(signal) : readDownloadConnection();
-      const request = await createDownloadRequest(connection, signal, showProgress);
-      if (!approved && !skipEstimate.checked) {
-        showProgress("動画の容量を確認しています…");
-        const response = await request("/api/downloads/estimate", {
-          method: "POST", body: { url, format }, expectedStatuses: [422, 504],
-        });
-        const estimate = await response.json().catch(() => null);
-        signal.throwIfAborted();
-        const input = { url, format, direct };
-        const olderServerFailure = (response.status === 504 && estimate?.message === "容量の確認に時間がかかりすぎました。") ||
-          (response.status === 422 && estimate?.message === "配信元から取得または変換できませんでした。時間をおいて試してください。");
-        if (!response.ok && (estimate?.code === "estimate_unavailable" || olderServerFailure)) {
-          showEstimate(null, input);
-        } else if (response.ok && typeof estimate?.title === "string") {
-          showEstimate(estimate, input);
-        } else {
-          throw new Error(typeof estimate?.message === "string" ? estimate.message :
-            "動画の容量を確認できませんでした。時間をおいてお試しください。");
-        }
-        return;
-      }
-      const input = await downloadVideoPage(url, format, request, signal, showProgress);
-      signal.throwIfAborted();
-      cancel.disabled = close.disabled = true;
-      showProgress("ライブラリに保存しています…");
-      const name = (input.name ?? "").replace(/\.[a-z0-9]{1,6}$/i, "").replace(/[\\/:*?"<>|\p{Cc}]+/gu, " ").trim();
-      await saveMedia(input.blob, (name.slice(0, 180) || "ダウンロード") + "." + format, format);
-      urlField.value = "";
-      clearFeedback();
-      dialog.close();
+  find("download-open").addEventListener("click", () => {
+    if (dialog.open) return;
+    find("add-dialog").close();
+    if (!job) {
+      for (const row of rows.filter((entry) => entry.saved)) removeRow(row);
+      ensureBlankRow();
+      numberRows();
+      message.textContent = "";
+    }
+    updateControls();
+    dialog.showModal();
+  });
+  close.addEventListener("click", () => {
+    job?.abort();
+    approval = null;
+    dialog.close();
+  });
+  dialog.addEventListener("cancel", (event) => {
+    if (close.disabled) event.preventDefault();
+    else {
+      job?.abort();
+      approval = null;
+    }
+  });
+  cancel.addEventListener("click", () => job?.abort());
+  skipEstimate.addEventListener("change", updateControls);
+  find("download-estimate-back").addEventListener("click", () => {
+    approval = null;
+    updateControls();
+    start.focus();
+  });
+  start.addEventListener("click", () => {
+    const { items, excluded } = rowBatch();
+    if (!items.length) {
+      message.textContent = "保存する動画の共有リンクを確認してください。";
+      return;
+    }
+    const direct = pcLocal.checked;
+    const skip = skipEstimate.checked;
+    runTask(async (signal) => {
+      const request = await requestFor(direct, signal);
+      if (skip) await saveBatch(items, excluded, request, signal);
+      else await checkBatch(items, direct, excluded, request, signal);
     });
-  }
+  });
+  confirm.addEventListener("click", () => {
+    if (!approval) return;
+    const { items, direct, excluded } = approval;
+    approval = null;
+    runTask(async (signal) => {
+      const request = await requestFor(direct, signal);
+      await saveBatch(items, excluded, request, signal);
+    });
+  });
 
-  for (const format of formats) format.addEventListener("click", () => run(format.value));
+  ensureBlankRow();
+  updateControls();
 }

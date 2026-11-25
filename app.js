@@ -140,7 +140,7 @@ function syncLayout() {
   library.inert = expanded;
   miniPlayer.inert = expanded;
   player.inert = mobile.matches && !expanded;
-  get("theme-color").content = expanded && !fullscreen ? "#132a22" : "#000000";
+  get("theme-color").content = fullscreen ? "#000000" : expanded ? "#121e31" : "#090d15";
   scheduleVideoLayout();
 }
 
@@ -704,7 +704,7 @@ function tintPlayer(image) {
     weightTotal += weight;
   }
   if (!weightTotal) return;
-  const color = total.map((value, channel) => Math.round(value / weightTotal * .38 + [20, 36, 28][channel]));
+  const color = total.map((value, channel) => Math.round(value / weightTotal * .38 + [18, 29, 47][channel]));
   player.style.setProperty("--player-tint", "rgb(" + color.join(", ") + ")");
 }
 
@@ -738,7 +738,7 @@ async function showArtwork(track) {
     const metadata = await readMediaMetadata(track);
     if (request !== artworkRequest) return;
     updateTrackMetadata(track, metadata);
-    const cover = track.edits?.cover ?? (isVideo(track) ? await getVideoThumbnail(track) : metadata.artwork);
+    const cover = track.edits?.cover ?? track.sourceCover ?? (isVideo(track) ? await getVideoThumbnail(track) : metadata.artwork);
     if (request !== artworkRequest) return;
     if (!cover) {
       clearArtwork();
@@ -1055,8 +1055,8 @@ async function saveTrack(track) {
 }
 
 async function persistTrack(track) {
-  const { blob, title, filename, addedAt, format } = track;
-  track.id = await trackStore.run(database, "readwrite", (store) => store.add({ blob, title, filename, addedAt, format }));
+  const { blob, title, filename, addedAt, format, sourceCover } = track;
+  track.id = await trackStore.run(database, "readwrite", (store) => store.add({ blob, title, filename, addedAt, format, ...(sourceCover && { sourceCover }) }));
   const { edits, plays, lastPlayed, videoThumbnail, metadata } = track;
   if (edits || plays || videoThumbnail || metadata) trackStore.updateDetails(database, track.id, (details) => {
     if (edits || plays) Object.assign(details, { edits, plays, lastPlayed });
@@ -1066,11 +1066,11 @@ async function persistTrack(track) {
   if (queue.history.includes(track)) saveHistory();
 }
 
-async function saveDownloadedMedia(blob, filename, format) {
+async function saveDownloadedMedia(blob, filename, format, sourceCover) {
   await storageReady;
   if (!database) throw new Error("このブラウザでは端末保存を利用できません。");
   const title = filename.slice(0, -(format.length + 1));
-  const track = { blob, title, filename, format, addedAt: Date.now() };
+  const track = { blob, title, filename, format, addedAt: Date.now(), sourceCover };
   try {
     await persistTrack(track);
   } catch (error) {
@@ -1305,7 +1305,7 @@ async function openTrackDetails(track) {
   const metadata = await readMediaMetadata(track).catch(() => null);
   if (detailsDraft !== draft) return;
   updateTrackMetadata(track, metadata);
-  draft.originalCover = metadata?.artwork;
+  draft.originalCover = track.sourceCover ?? metadata?.artwork;
   previewDetailsCover(draft);
   get("details-name").value = trackTitle(track);
   get("details-artist").value = trackArtist(track);
@@ -1363,7 +1363,7 @@ async function decodeTrackPreview(track) {
   try {
     const metadata = await readMediaMetadata(track);
     updateTrackMetadata(track, metadata);
-    const cover = track.edits?.cover ?? (isVideo(track) ? await getVideoThumbnail(track) : metadata.artwork);
+    const cover = track.edits?.cover ?? track.sourceCover ?? (isVideo(track) ? await getVideoThumbnail(track) : metadata.artwork);
     if (!cover || !tracks.includes(track)) return;
     if (cover === track.videoThumbnail) {
       track.thumbnail = URL.createObjectURL(cover);
@@ -1551,6 +1551,7 @@ function setTrackSelection(mode, folder = activeFolder) {
     tellLibrary("");
     selectionTitle.textContent = { add: "フォルダへ一括追加", remove: "フォルダから一括で出す", delete: "一括削除" }[mode];
     selectionConfirm.textContent = mode === "delete" ? "削除" : "確定";
+    selectionConfirm.classList.toggle("action-danger", mode === "delete");
     list.dataset.selecting = mode;
     libraryScrollArea().scrollTop = 0;
   } else {
@@ -1741,18 +1742,31 @@ librarySettings.addEventListener("click", openLibraryMenu);
 get("folder-back").addEventListener("click", () => showFolder(null));
 const folderName = get("folder-name");
 const folderSubmit = get("folder-submit");
+const folderViewport = window.visualViewport;
 let folderToRename = null;
+
+function fitFolderEditor() {
+  if (!folderViewport) return;
+  createFolderDialog.style.setProperty("--folder-visible-top", folderViewport.offsetTop + "px");
+  createFolderDialog.style.setProperty("--folder-visible-height", folderViewport.height + "px");
+}
+
 function openFolderEditor(folder = null) {
   folderToRename = folder;
   get("folder-create-title").textContent = folder ? "フォルダ名を変更" : "フォルダを作成";
   folderSubmit.textContent = folder ? "保存" : "作成";
   folderName.value = folder?.name ?? "";
   folderName.setCustomValidity("");
+  fitFolderEditor();
+  folderViewport?.addEventListener("resize", fitFolderEditor);
+  folderViewport?.addEventListener("scroll", fitFolderEditor);
   createFolderDialog.showModal();
 }
 newFolder.addEventListener("click", () => openFolderEditor());
 createFolderDialog.addEventListener("close", () => {
   folderToRename = null;
+  folderViewport?.removeEventListener("resize", fitFolderEditor);
+  folderViewport?.removeEventListener("scroll", fitFolderEditor);
 });
 folderName.addEventListener("input", () => folderName.setCustomValidity(""));
 createFolderDialog.querySelector("form").addEventListener("submit", (event) => {
@@ -2433,9 +2447,12 @@ syncLayout();
 const storageReady = restoreTracks();
 setupMediaDownloads(saveDownloadedMedia);
 setupPCTransfer({
-  async getTracks() {
+  async getLibrary() {
     await storageReady;
-    return tracks.filter((track) => track.id !== undefined);
+    return {
+      root: rootTracks(),
+      folders: folders.map((folder) => ({ name: folder.name, tracks: [...folder.tracks] })),
+    };
   },
   async hasTrack(pcTransferId) {
     await storageReady;
@@ -2444,6 +2461,8 @@ setupPCTransfer({
   },
   saveTrack: savePCTrack,
   displayTitle: trackTitle,
+  displayArtist: trackArtist,
+  showThumbnail: showTrackThumbnail,
   async readTitle(track) {
     if (track.edits?.title || track.metadata) return trackTitle(track);
     const metadata = await readMediaMetadata(track, false).catch(() => null);

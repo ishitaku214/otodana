@@ -222,7 +222,11 @@ function setupPCTransfer(library) {
   const dialog = find("dialog");
   const send = find("send");
   const receive = find("receive");
+  const sender = find("sender");
   const list = find("tracks");
+  const selectAll = find("select-all");
+  const clearAll = find("clear-all");
+  const folderBack = find("folder-back");
   const create = find("create");
   const connect = find("connect");
   const input = find("input");
@@ -230,9 +234,21 @@ function setupPCTransfer(library) {
   const progress = find("progress");
   const status = find("status");
   const cancel = find("cancel");
-  let available = [];
+  const chosen = new Set();
+  const visibleChoices = new Map();
+  let contents = { root: [], folders: [] };
+  let folder = null;
+  let choicesRevision = 0;
   let controller;
   let lastProgress = 0;
+
+  const artworkObserver = "IntersectionObserver" in window ? new IntersectionObserver((entries, observer) => {
+    for (const { target, isIntersecting } of entries) {
+      if (!isIntersecting) continue;
+      observer.unobserve(target);
+      target.loadArtwork();
+    }
+  }, { root: list, rootMargin: "64px" }) : null;
 
   function showProgress(message, value) {
     if (typeof value !== "number" || status.textContent !== message || value === 100 || performance.now() - lastProgress > 100) {
@@ -244,7 +260,7 @@ function setupPCTransfer(library) {
   }
 
   function selectedTracks() {
-    return [...list.querySelectorAll("input:checked")].map((checkbox) => available[Number(checkbox.value)]);
+    return [...contents.folders.flatMap((entry) => entry.tracks), ...contents.root].filter((track) => chosen.has(track));
   }
 
   function normalizedCode() {
@@ -254,40 +270,141 @@ function setupPCTransfer(library) {
 
   function updateControls() {
     const busy = Boolean(controller);
-    create.disabled = busy || !selectedTracks().length;
+    create.disabled = busy || !chosen.size;
     connect.disabled = busy || !pcTransferCode.test(normalizedCode());
-    for (const element of [send, receive, input, find("settings"), ...list.querySelectorAll("input")]) {
+    const visible = [...visibleChoices.keys()];
+    selectAll.disabled = busy || visible.every((track) => chosen.has(track));
+    clearAll.disabled = busy || !visible.some((track) => chosen.has(track));
+    const count = chosen.size ? chosen.size + "件選択中" : "";
+    if (find("count").textContent !== count) find("count").textContent = count;
+    for (const element of [send, receive, input, find("settings"), folderBack, ...list.querySelectorAll("button"), ...visibleChoices.values()]) {
       element.disabled = busy;
     }
     cancel.hidden = !busy;
   }
 
+  function choiceArtwork(track, forFolder = false, updateCopy) {
+    const artwork = document.createElement("span");
+    artwork.className = forFolder ? "thumb folder-icon" : "thumb";
+    artwork.setAttribute("aria-hidden", "true");
+    const image = new Image();
+    image.alt = "";
+    image.hidden = !track?.thumbnail;
+    if (track?.thumbnail) image.src = track.thumbnail;
+    artwork.append(image);
+    if (track) {
+      artwork.track = track;
+      artwork.loadArtwork = async () => {
+        await library.showThumbnail(artwork);
+        if (artwork.isConnected) updateCopy?.();
+      };
+      if (artworkObserver && !track.preview) artworkObserver.observe(artwork);
+      else artwork.loadArtwork();
+    }
+    return artwork;
+  }
+
+  function folderChoice(entry) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "pc-transfer-folder";
+    button.innerHTML = '<span class="track-copy"><span class="track-name"></span><span class="track-artist"></span></span><span aria-hidden="true" class="pc-transfer-chevron">›</span>';
+    button.querySelector(".track-name").textContent = entry.name;
+    button.querySelector(".track-artist").textContent = entry.tracks.length + " 曲";
+    button.prepend(choiceArtwork(entry.tracks[0], true));
+    button.addEventListener("click", () => {
+      folder = entry;
+      renderChoices();
+      folderBack.focus({ preventScroll: true });
+    });
+    return button;
+  }
+
+  function trackChoice(track) {
+    const row = document.createElement("label");
+    row.className = "pc-transfer-track";
+    row.innerHTML = '<input type="checkbox"><span class="track-copy"><span class="track-name"></span><span class="track-artist" hidden></span></span><small></small>';
+    const checkbox = row.firstElementChild;
+    const title = row.querySelector(".track-name");
+    const artist = row.querySelector(".track-artist");
+    const size = row.querySelector("small");
+    const bytes = track.blob?.size;
+    const canSend = track.id !== undefined && bytes > 0 && bytes <= pcTransferLimit;
+    function updateCopy() {
+      title.textContent = library.displayTitle(track) || track.filename || track.blob?.name || "名前のない項目";
+      artist.textContent = library.displayArtist(track);
+      artist.hidden = !artist.textContent;
+    }
+    updateCopy();
+    row.insertBefore(choiceArtwork(track, false, updateCopy), checkbox.nextElementSibling);
+    size.textContent = canSend ? (bytes / 1_000_000).toFixed(1) + " MB"
+      : bytes > pcTransferLimit ? "容量上限を超過" : "転送できません";
+    checkbox.checked = chosen.has(track);
+    checkbox.disabled = !canSend;
+    if (canSend) {
+      visibleChoices.set(track, checkbox);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) chosen.add(track);
+        else chosen.delete(track);
+        updateControls();
+      });
+    }
+    return row;
+  }
+
+  function renderChoices() {
+    artworkObserver?.disconnect();
+    visibleChoices.clear();
+    find("folder-heading").hidden = !folder;
+    find("folder-name").textContent = folder?.name ?? "";
+    const entries = folder?.tracks ?? contents.root;
+    const folderButtons = folder ? [] : contents.folders.map(folderChoice);
+    list.replaceChildren(...folderButtons, ...entries.map(trackChoice));
+    list.scrollTop = 0;
+    find("selection").textContent = folder && !entries.length ? "このフォルダに曲がありません。"
+      : !folderButtons.length && !entries.length ? "この端末のライブラリに曲がありません。"
+      : "送るファイルを選んでください。1件128 MBまで。";
+    updateControls();
+  }
+
   async function loadChoices() {
-    available = (await library.getTracks()).filter((track) => track.blob?.size > 0 && track.blob.size <= pcTransferLimit);
-    list.replaceChildren(...available.map((track, index) => {
-      const row = document.createElement("label");
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.value = index;
-      const title = document.createElement("span");
-      title.textContent = library.displayTitle(track) || track.filename || track.blob.name || "名前のない項目";
-      const size = document.createElement("small");
-      size.textContent = (track.blob.size / 1_000_000).toFixed(1) + " MB";
-      row.append(checkbox, title, size);
-      return row;
-    }));
-    find("selection").textContent = available.length ? "送るファイルを選んでください。1件128 MBまで。" :
-      "送れる項目がありません。この端末のライブラリにファイルを追加してください（1件128 MBまで）。";
+    const revision = ++choicesRevision;
+    chosen.clear();
+    folder = null;
+    contents = { root: [], folders: [] };
+    renderChoices();
+    find("selection").textContent = "ライブラリを読み込んでいます…";
+    try {
+      const loaded = await library.getLibrary();
+      if (revision !== choicesRevision || sender.hidden || !dialog.open) return;
+      contents = loaded;
+      renderChoices();
+    } catch {
+      if (revision === choicesRevision) find("selection").textContent = "ライブラリを読み込めませんでした。";
+    }
+  }
+
+  function selectVisible(checked) {
+    for (const [track, checkbox] of visibleChoices) {
+      checkbox.checked = checked;
+      if (checked) chosen.add(track);
+      else chosen.delete(track);
+    }
     updateControls();
   }
 
   function selectMode(sending) {
-    find("sender").hidden = !sending;
+    if (sending && !sender.hidden) return;
+    sender.hidden = !sending;
     find("receiver").hidden = sending;
     send.setAttribute("aria-pressed", sending);
     receive.setAttribute("aria-pressed", !sending);
     showProgress("");
     if (sending) loadChoices();
+    else {
+      choicesRevision++;
+      artworkObserver?.disconnect();
+    }
   }
 
   async function run(sending) {
@@ -391,7 +508,14 @@ function setupPCTransfer(library) {
   });
   send.addEventListener("click", () => selectMode(true));
   receive.addEventListener("click", () => selectMode(false));
-  list.addEventListener("change", updateControls);
+  selectAll.addEventListener("click", () => selectVisible(true));
+  clearAll.addEventListener("click", () => selectVisible(false));
+  folderBack.addEventListener("click", () => {
+    const previous = folder;
+    folder = null;
+    renderChoices();
+    list.children[contents.folders.indexOf(previous)]?.focus({ preventScroll: true });
+  });
   input.addEventListener("input", updateControls);
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !connect.disabled) connect.click();
@@ -399,5 +523,9 @@ function setupPCTransfer(library) {
   create.addEventListener("click", () => run(true));
   connect.addEventListener("click", () => run(false));
   cancel.addEventListener("click", () => controller?.abort(new Error("転送を中止しました。保存済みの項目はライブラリに残っています。")));
-  dialog.addEventListener("close", () => cancel.click());
+  dialog.addEventListener("close", () => {
+    choicesRevision++;
+    artworkObserver?.disconnect();
+    cancel.click();
+  });
 }

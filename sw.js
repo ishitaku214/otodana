@@ -2,12 +2,12 @@
 
 const scope = self.registration.scope;
 const cachePrefix = `otodana:${scope}:`;
-const cacheName = `${cachePrefix}v38`;
+const cacheName = `${cachePrefix}v40.1`;
 const index = new URL("index.html", scope).href;
 const assets = [
-  "index.html", "style.css?v=35", "app.js?v=36", "queue.js?v=24", "storage.js?v=27", "artwork.js?v=4", "manifest.webmanifest",
-  "download.js?v=37", "pc-transfer.js?v=35",
-  "icon-192.png", "icon-512.png",
+  "index.html", "style.css?v=40.1", "app.js?v=40", "queue.js?v=24", "storage.js?v=27", "artwork.js?v=4", "manifest.webmanifest?v=40",
+  "download.js?v=39", "pc-transfer.js?v=39",
+  "icon-192.png?v=40", "icon-512.png?v=40",
 ].map((path) => new URL(path, scope).href);
 
 self.addEventListener("install", (event) => {
