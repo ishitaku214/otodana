@@ -204,6 +204,10 @@ function trackTitle(track) {
   return track?.edits?.title || track?.metadata?.title || track?.title || "";
 }
 
+function displayTrackTitle(track) {
+  return track && !track.edits?.title && !track.metadata && !isVideo(track) ? "読み込み中…" : trackTitle(track);
+}
+
 function isVideo(track) {
   return Boolean(track?.format && track.format !== "mp3");
 }
@@ -260,7 +264,7 @@ function setMarquee(element, value, optional = false) {
 function updateMediaMetadata() {
   if (!mediaSession || typeof MediaMetadata !== "function") return;
   mediaSession.metadata = current ? new MediaMetadata({
-    title: trackTitle(current),
+    title: displayTrackTitle(current),
     artist: trackArtist(current),
     album: trackAlbum(current),
     artwork: artworkTrack === current && artworkUrl ? [{ src: artworkUrl }] : [],
@@ -283,7 +287,7 @@ function queueTrackButton(track, action, showArtist = false) {
   thumbnail.track = track;
   const title = document.createElement("span");
   title.className = "queue-name";
-  title.textContent = queueTrackTitle(track);
+  title.textContent = displayTrackTitle(track);
   button.append(thumbnail);
   if (showArtist) {
     const copy = document.createElement("span");
@@ -301,10 +305,6 @@ function queueTrackButton(track, action, showArtist = false) {
   if (track.preview || !queueThumbnailObserver) showTrackThumbnail(thumbnail);
   else queueThumbnailObserver.observe(thumbnail);
   return button;
-}
-
-function queueTrackTitle(track) {
-  return track.metadata || track.edits?.title || isVideo(track) ? trackTitle(track) : "読み込み中…";
 }
 
 async function showTrackThumbnail(thumbnail) {
@@ -340,7 +340,7 @@ function renderQueue(anchor = false) {
   cancelQueueGesture();
   queueThumbnailObserver?.disconnect();
   const scroll = queuePanel.scrollTop;
-  get("queue-now-title").textContent = trackTitle(current);
+  get("queue-now-title").textContent = displayTrackTitle(current);
   get("queue-now-artist").textContent = trackArtist(current);
   const history = recordedCurrent ? queue.history.slice(0, -1) : queue.history;
   const historyRows = history.map((track) => {
@@ -555,7 +555,7 @@ function showQueue(visible) {
 }
 
 function updateSelection() {
-  const title = trackTitle(current);
+  const title = displayTrackTitle(current);
   const artist = trackArtist(current);
   setMarquee(get("now-playing"), title || "曲を選んでください");
   setMarquee(get("playing-artist"), artist);
@@ -720,7 +720,13 @@ function makeBackdrop(image) {
 }
 
 function updateTrackMetadata(track, metadata) {
-  track.metadata = { title: metadata.title, artist: metadata.artist, album: metadata.album };
+  if (!metadata && track.metadata) return;
+  const next = { title: metadata?.title, artist: metadata?.artist, album: metadata?.album };
+  if (track.metadata && Object.keys(next).every((key) => next[key] === track.metadata[key])) return;
+  track.metadata = next;
+  if (metadata && !isVideo(track) && database && track.id !== undefined && track.busy !== "delete") {
+    trackStore.updateDetails(database, track.id, (details) => { details.metadata = next; }).catch(() => {});
+  }
   if (current === track) updateSelection();
 }
 
@@ -781,6 +787,7 @@ async function showArtwork(track) {
     if (request === artworkRequest) setBackdrop(softImage);
   } catch {
     if (request === artworkRequest) {
+      updateTrackMetadata(track, null);
       clearArtwork();
       setBackdrop(null);
     }
@@ -975,6 +982,7 @@ async function restoreTracks() {
         const track = savedById.get(entry.id);
         if (track) {
           track.edits = entry.edits;
+          track.metadata = entry.metadata;
           track.plays = entry.plays;
           track.lastPlayed = entry.lastPlayed;
           track.videoThumbnail = entry.videoThumbnail;
@@ -1049,10 +1057,11 @@ async function saveTrack(track) {
 async function persistTrack(track) {
   const { blob, title, filename, addedAt, format } = track;
   track.id = await trackStore.run(database, "readwrite", (store) => store.add({ blob, title, filename, addedAt, format }));
-  const { edits, plays, lastPlayed, videoThumbnail } = track;
-  if (edits || plays || videoThumbnail) trackStore.updateDetails(database, track.id, (details) => {
+  const { edits, plays, lastPlayed, videoThumbnail, metadata } = track;
+  if (edits || plays || videoThumbnail || metadata) trackStore.updateDetails(database, track.id, (details) => {
     if (edits || plays) Object.assign(details, { edits, plays, lastPlayed });
     if (videoThumbnail) details.videoThumbnail = videoThumbnail;
+    if (metadata) details.metadata = metadata;
   }).catch(() => trackFeedback(track, "曲の情報を保存できませんでした。"));
   if (queue.history.includes(track)) saveHistory();
 }
@@ -1293,10 +1302,10 @@ async function openTrackDetails(track) {
   detailsImage.disabled = true;
   detailsDialog.showModal();
   readDetailsDuration(draft);
-  const metadata = await readMediaMetadata(track).catch(() => ({}));
+  const metadata = await readMediaMetadata(track).catch(() => null);
   if (detailsDraft !== draft) return;
   updateTrackMetadata(track, metadata);
-  draft.originalCover = metadata.artwork;
+  draft.originalCover = metadata?.artwork;
   previewDetailsCover(draft);
   get("details-name").value = trackTitle(track);
   get("details-artist").value = trackArtist(track);
@@ -1379,6 +1388,7 @@ async function decodeTrackPreview(track) {
     }
   } catch {
     // Unreadable metadata does not prevent playback.
+    updateTrackMetadata(track, null);
   }
 }
 
@@ -1399,7 +1409,7 @@ function getVideoThumbnail(track) {
 
 function updateTrackRow(row) {
   const track = row.track;
-  const title = trackTitle(track);
+  const title = displayTrackTitle(track);
   row.querySelector(".track-name").textContent = title;
   const artist = row.querySelector(".track-artist");
   artist.textContent = trackArtist(track) || trackAlbum(track);
@@ -1634,7 +1644,7 @@ async function filterLibrary() {
     if (track.metadata || !tracks.includes(track)) continue;
     track.searchMetadata ??= track.preview ?? readMediaMetadata(track, false)
       .then((metadata) => updateTrackMetadata(track, metadata))
-      .catch(() => { track.metadata = {}; });
+      .catch(() => updateTrackMetadata(track, null));
     await track.searchMetadata;
   }
   if (revision === searchRevision && searching) {
@@ -2434,6 +2444,12 @@ setupPCTransfer({
   },
   saveTrack: savePCTrack,
   displayTitle: trackTitle,
+  async readTitle(track) {
+    if (track.edits?.title || track.metadata) return trackTitle(track);
+    const metadata = await readMediaMetadata(track, false).catch(() => null);
+    updateTrackMetadata(track, metadata);
+    return trackTitle(track);
+  },
 });
 
 if (mediaSession) {

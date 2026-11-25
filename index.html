@@ -10,20 +10,23 @@
   <link rel="icon" href="icon-192.png">
   <link rel="apple-touch-icon" href="icon-192.png">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="stylesheet" href="style.css?v=32">
+  <link rel="stylesheet" href="style.css?v=35">
   <script src="storage.js?v=27" defer></script>
   <script src="artwork.js?v=4" defer></script>
   <script src="queue.js?v=24" defer></script>
-  <script src="download.js?v=32" defer></script>
-  <script src="pc-transfer.js?v=33" defer></script>
-  <script src="app.js?v=32" defer></script>
+  <script src="download.js?v=37" defer></script>
+  <script src="pc-transfer.js?v=35" defer></script>
+  <script src="app.js?v=36" defer></script>
 </head>
 <body data-view="library">
   <main class="layout">
     <section id="library" aria-labelledby="library-title">
       <div class="library-heading">
         <button type="button" id="folder-back" hidden>‹ ライブラリ</button>
-        <h1 id="library-title" tabindex="-1">ライブラリ</h1>
+        <div class="library-title-row">
+          <h1 id="library-title" tabindex="-1">ライブラリ</h1>
+          <span id="app-version" aria-label="バージョン37">v37</span>
+        </div>
         <div class="library-summary">
           <span id="track-count">0 曲</span>
           <span id="storage-summary">保存した曲を確認しています…</span>
@@ -195,6 +198,7 @@
     <div id="download-options" class="dialog-actions">
       <button type="button" value="mp4">MP4で保存</button>
       <button type="button" value="mp3">MP3で保存</button>
+      <label id="download-pc-option" class="skip-download-estimate" hidden><input type="checkbox" id="download-pc-local">このPCから直接取得</label>
       <label class="skip-download-estimate"><input type="checkbox" id="download-skip-estimate">容量確認を省いて保存</label>
     </div>
     <section id="download-estimate" aria-labelledby="download-estimate-title" hidden>
@@ -222,24 +226,24 @@
       <h2 id="pc-transfer-title">ほか端末と同期する</h2>
       <form method="dialog"><button type="submit" class="library-icon" aria-label="閉じる">×</button></form>
     </div>
-    <p class="feedback">両方の端末を同じWi-Fiにつなぎ、それぞれで音棚を開いてください。</p>
+    <p class="feedback">両方の端末を同じWi-Fiにつないでください。</p>
     <div class="dialog-actions" id="pc-transfer-modes">
       <button type="button" id="pc-transfer-send" aria-pressed="false">曲を送る</button>
       <button type="button" id="pc-transfer-receive" aria-pressed="true">曲を受け取る</button>
     </div>
     <div id="pc-transfer-sender" class="pc-transfer-panel" hidden>
+      <div id="pc-transfer-pair" hidden>
+        <label for="pc-transfer-code">受け取る端末に入力するコード</label>
+        <input id="pc-transfer-code" type="text" dir="ltr" readonly>
+        <p class="feedback">転送が終わるまで、両方の端末でこの画面を開いてください。</p>
+      </div>
       <p id="pc-transfer-selection" class="feedback">送るファイルを選んでください。1件128 MBまで。</p>
       <div id="pc-transfer-tracks" aria-label="送るファイル"></div>
       <button type="button" class="pc-transfer-primary" id="pc-transfer-create" disabled>転送コードを表示</button>
-      <div id="pc-transfer-pair" hidden>
-        <label for="pc-transfer-code">受け取る端末に入力するコード</label>
-        <input id="pc-transfer-code" type="text" readonly>
-        <p class="feedback">受け取りが終わるまで、両方の端末でこの画面を開いてください。</p>
-      </div>
     </div>
     <div id="pc-transfer-receiver" class="pc-transfer-panel">
       <label for="pc-transfer-input">送る端末に表示された転送コード</label>
-      <input id="pc-transfer-input" type="text" placeholder="XXXX-XXXX-XXXX" maxlength="16" autocapitalize="characters" autocomplete="off" spellcheck="false">
+      <input id="pc-transfer-input" type="text" placeholder="例 a7k3" maxlength="16" autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false">
       <button type="button" class="pc-transfer-primary" id="pc-transfer-connect" disabled>受け取りを開始</button>
     </div>
     <progress id="pc-transfer-progress" max="100" aria-label="転送の進み具合" hidden></progress>

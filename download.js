@@ -2,6 +2,8 @@
 
 const downloadLimit = 128_000_000;
 const downloadConnectionKey = "otodana-download-connection";
+const pcDownloadOrigin = "http://127.0.0.1:8787";
+const pcDownloadUnavailable = "PCの取得機能に接続できません。「Windows版を開く.cmd」を開き、ブラウザに接続の確認が出たら許可してください。";
 
 class DownloadConnectionError extends Error {}
 
@@ -120,22 +122,26 @@ async function waitForRenderServer(origin, signal, showProgress) {
 
 async function createDownloadRequest(connection, signal, showProgress) {
   if (!connection.origin || !connection.token) throw new DownloadConnectionError("取得サーバーのURLと接続キーを保存してください。");
-  const origin = downloadServerOrigin(connection.origin);
+  const origin = connection.pcLocal ? pcDownloadOrigin : downloadServerOrigin(connection.origin);
+  const networkOptions = connection.pcLocal ? { targetAddressSpace: "loopback" } : {};
   if (new URL(origin).hostname.endsWith(".onrender.com")) await waitForRenderServer(origin, signal, showProgress);
   return async (path, { method = "GET", body, requestSignal = signal, expectedStatuses = [] } = {}) => {
     let response;
     try {
       response = await fetch(origin + path, {
+        ...networkOptions,
         method, body: body ? JSON.stringify(body) : undefined, signal: requestSignal,
         headers: { Authorization: "Bearer " + connection.token, ...(body && { "Content-Type": "application/json" }) },
         credentials: "omit", cache: "no-store", redirect: "error",
       });
     } catch (error) {
       if (requestSignal.aborted) throw error;
-      throw new DownloadConnectionError("取得サーバーに接続できません。「接続を確認」または「登録先の稼働ページ」から状況を確認してください。");
+      throw new DownloadConnectionError(connection.pcLocal ? pcDownloadUnavailable :
+        "取得サーバーに接続できません。「接続を確認」または「登録先の稼働ページ」から状況を確認してください。");
     }
     if (response.status === 401) {
-      throw new DownloadConnectionError("接続キーが一致しません。Renderの管理画面で接続キーを確認してください。");
+      throw new DownloadConnectionError(connection.pcLocal ? "PCの取得機能が再起動しました。もう一度保存を試してください。" :
+        "接続キーが一致しません。Renderの管理画面で接続キーを確認してください。");
     }
     if (!response.ok && !expectedStatuses.includes(response.status)) {
       const details = await response.json().catch(() => ({}));
@@ -143,6 +149,23 @@ async function createDownloadRequest(connection, signal, showProgress) {
     }
     return response;
   };
+}
+
+async function readPCDownloadConnection(signal) {
+  try {
+    const response = await fetch(pcDownloadOrigin + "/api/pc-download/session", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
+      targetAddressSpace: "loopback", credentials: "omit", cache: "no-store", redirect: "error",
+    });
+    if (response.ok) {
+      const { token } = await response.json();
+      if (typeof token === "string" && /^[\w-]{43}$/.test(token)) return { origin: pcDownloadOrigin, token, pcLocal: true };
+    }
+  } catch (error) {
+    if (signal.aborted) throw error;
+  }
+  throw new DownloadConnectionError(pcDownloadUnavailable);
 }
 
 async function downloadVideoPage(url, format, request, signal, showProgress) {
@@ -296,6 +319,10 @@ function setupMediaDownloads(saveMedia) {
   const urlField = find("download-url");
   const settingsButton = find("download-settings");
   const skipEstimate = find("download-skip-estimate");
+  const pcLocal = find("download-pc-local");
+  const onWindows = location.origin === pcDownloadOrigin || /^Win/i.test(navigator.userAgentData?.platform ?? navigator.platform);
+  find("download-pc-option").hidden = !onWindows;
+  pcLocal.checked = onWindows;
   const menu = find("download-options");
   const progress = find("download-progress");
   const estimatePanel = find("download-estimate");
@@ -344,7 +371,7 @@ function setupMediaDownloads(saveMedia) {
   }
 
   function toggleRunning(running) {
-    for (const element of [urlField, settingsButton, skipEstimate, ...formats]) element.disabled = running;
+    for (const element of [urlField, settingsButton, skipEstimate, pcLocal, ...formats]) element.disabled = running;
     cancel.hidden = !running;
     cancel.disabled = close.disabled = false;
   }
@@ -370,7 +397,7 @@ function setupMediaDownloads(saveMedia) {
     formats[0].focus();
   });
   confirm.addEventListener("click", () => {
-    if (checkedDownload) run(checkedDownload.format, checkedDownload.url);
+    if (checkedDownload) run(checkedDownload.format, checkedDownload);
   });
 
   async function runTask(operation) {
@@ -394,19 +421,22 @@ function setupMediaDownloads(saveMedia) {
     }
   }
 
-  function run(format, approvedUrl) {
+  function run(format, approved) {
     return runTask(async (signal) => {
-      const url = approvedUrl ?? urlField.value.trim();
+      const url = approved?.url ?? urlField.value.trim();
       if (!url) throw new Error("YouTubeまたはニコニコ動画の共有リンクを入力してください。");
-      const request = await createDownloadRequest(readDownloadConnection(), signal, showProgress);
-      if (!approvedUrl && !skipEstimate.checked) {
+      const direct = approved?.direct ?? pcLocal.checked;
+      if (direct) showProgress("PCの取得機能に接続しています…");
+      const connection = direct ? await readPCDownloadConnection(signal) : readDownloadConnection();
+      const request = await createDownloadRequest(connection, signal, showProgress);
+      if (!approved && !skipEstimate.checked) {
         showProgress("動画の容量を確認しています…");
         const response = await request("/api/downloads/estimate", {
           method: "POST", body: { url, format }, expectedStatuses: [422, 504],
         });
         const estimate = await response.json().catch(() => null);
         signal.throwIfAborted();
-        const input = { url, format };
+        const input = { url, format, direct };
         const olderServerFailure = (response.status === 504 && estimate?.message === "容量の確認に時間がかかりすぎました。") ||
           (response.status === 422 && estimate?.message === "配信元から取得または変換できませんでした。時間をおいて試してください。");
         if (!response.ok && (estimate?.code === "estimate_unavailable" || olderServerFailure)) {

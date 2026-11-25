@@ -4,7 +4,7 @@ const pcTransferPath = "/api/pc-transfer";
 const pcTransferLimit = 128_000_000;
 const pcTransferChunk = 16_384;
 const pcTransferChannel = "otodana-pc-v1";
-const pcTransferCode = /^[A-F0-9]{12}$/;
+const pcTransferCode = /^(?:[a-z0-9]{4}|[a-f0-9]{12})$/i;
 const pcTransferIdPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:[1-9]\d*$/;
 
 function waitForPCTransfer(delay, signal) {
@@ -82,7 +82,7 @@ function pcTransferMessage(data) {
   return message;
 }
 
-function pcTrackInfo(track, deviceId) {
+function pcTrackInfo(track, deviceId, displayTitle) {
   const storedFilename = typeof track.filename === "string" && track.filename.trim();
   const blobFilename = typeof track.blob.name === "string" && track.blob.name.trim();
   const originalName = storedFilename || blobFilename || "";
@@ -93,7 +93,7 @@ function pcTrackInfo(track, deviceId) {
       : Object.keys(mediaFormats).find((key) => mediaFormats[key] === track.blob.type) ?? "mp3";
   }
   const fallbackTitle = format === "mp3" ? "曲" : "動画";
-  const title = [track.title, originalName.replace(/\.[a-z0-9]+$/i, ""), track.metadata?.title, track.edits?.title]
+  const title = [displayTitle, track.title, originalName.replace(/\.[a-z0-9]+$/i, "")]
     .find((value) => typeof value === "string" && value.trim())?.trim() || fallbackTitle;
   const basename = title.replace(/[\\/:*?"<>|\p{Cc}]+/gu, " ").trim() || fallbackTitle;
   const filename = originalName.slice(0, 300) || basename.slice(0, 299 - format.length) + "." + format;
@@ -132,7 +132,7 @@ function validatePCTrack(item) {
   return { title, filename, format, pcTransferId, bytes, edits: Object.keys(edits).length ? edits : undefined };
 }
 
-async function sendPCMedia(channel, next, selected, signal, showProgress) {
+async function sendPCMedia(channel, next, selected, readTitle, signal, showProgress) {
   const deviceKey = "otodana-pc-transfer-device";
   let deviceId = localStorage.getItem(deviceKey);
   if (!deviceId) {
@@ -143,7 +143,9 @@ async function sendPCMedia(channel, next, selected, signal, showProgress) {
   let skipped = 0;
   for (const [index, track] of selected.entries()) {
     signal.throwIfAborted();
-    const item = pcTrackInfo(track, deviceId);
+    const title = await readTitle(track);
+    signal.throwIfAborted();
+    const item = pcTrackInfo(track, deviceId, title);
     channel.send(JSON.stringify(item));
     const reply = pcTransferMessage(await next());
     if (reply.type === "skip") {
@@ -151,7 +153,7 @@ async function sendPCMedia(channel, next, selected, signal, showProgress) {
       continue;
     }
     if (reply.type !== "ready") throw new Error("受け取り先の応答を確認できませんでした。");
-    const status = `${index + 1} / ${selected.length} 件目を送信中…`;
+    const status = `${index + 1} / ${selected.length} 件目「${item.title}」を送信中…`;
     showProgress(status, 0);
     for (let sent = 0; sent < item.bytes;) {
       await waitForPeerConnection(() => channel.bufferedAmount <= 512_000 || channel.readyState !== "open", signal, 45_000, 30);
@@ -246,7 +248,8 @@ function setupPCTransfer(library) {
   }
 
   function normalizedCode() {
-    return input.value.trim().replaceAll("-", "").toUpperCase();
+    const code = input.value.trim().replaceAll("-", "");
+    return code.length === 4 ? code.toLowerCase() : code.toUpperCase();
   }
 
   function updateControls() {
@@ -318,12 +321,13 @@ function setupPCTransfer(library) {
       if (sending) {
         useChannel(peer.createDataChannel(pcTransferChannel));
         const offer = await pcLocalDescription(peer, await peer.createOffer(), signal);
-        const created = await request(pcTransferPath, { method: "POST", body: { offer } });
+        const created = await request(pcTransferPath, { method: "POST", body: { offer, shortCode: true } });
         const { code } = await created.json();
-        if (!pcTransferCode.test(code)) throw new Error("転送コードを発行できませんでした。");
+        if (typeof code !== "string" || !pcTransferCode.test(code)) throw new Error("転送コードを発行できませんでした。");
         room = pcTransferPath + "/" + code;
-        codeDisplay.value = code.match(/.{4}/g).join("-");
+        codeDisplay.value = code.toLowerCase().match(/.{4}/g).join("-");
         find("pair").hidden = false;
+        dialog.scrollTop = 0;
         showProgress("受け取る端末でコードを入力してください。");
         while (true) {
           const pending = await request(room);
@@ -357,7 +361,7 @@ function setupPCTransfer(library) {
         find("pair").hidden = true;
       }
       const result = sending
-        ? await sendPCMedia(channel, next, selected, signal, showProgress)
+        ? await sendPCMedia(channel, next, selected, library.readTitle, signal, showProgress)
         : await receivePCMedia(channel, next, library, signal, showProgress);
       const skipped = result.skipped ? ` すでに保存済みの ${result.skipped} 件を省きました。` : "";
       showProgress(`${result.saved} 件を${sending ? "送信" : "端末に保存"}しました。` + skipped);
