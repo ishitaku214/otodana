@@ -4,7 +4,9 @@ const downloadLimit = 128_000_000;
 const downloadConnectionKey = "otodana-download-connection";
 const downloadQueueKey = "otodana-download-queue";
 const pcDownloadOrigin = "http://127.0.0.1:8787";
-const pcDownloadUnavailable = "PCの取得機能に接続できません。「Windows版を開く.cmd」を開き、ブラウザに接続の確認が出たら許可してください。";
+const pcDownloadLaunchUrl = "otodana-pc://start";
+const pcDownloadStartupWait = 60_000;
+const pcDownloadInterrupted = "PCとの接続が途中で切れました。「PC接続を確認」を押し、未保存の項目をもう一度お試しください。";
 
 class DownloadConnectionError extends Error {}
 
@@ -137,7 +139,7 @@ async function createDownloadRequest(connection, signal, showProgress) {
       });
     } catch (error) {
       if (requestSignal.aborted) throw error;
-      throw new DownloadConnectionError(connection.pcLocal ? pcDownloadUnavailable :
+      throw new DownloadConnectionError(connection.pcLocal ? pcDownloadInterrupted :
         "取得サーバーに接続できません。「接続を確認」または「登録先の稼働ページ」から状況を確認してください。");
     }
     if (response.status === 401) {
@@ -152,21 +154,51 @@ async function createDownloadRequest(connection, signal, showProgress) {
   };
 }
 
-async function readPCDownloadConnection(signal) {
-  try {
-    const response = await fetch(pcDownloadOrigin + "/api/pc-download/session", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
-      targetAddressSpace: "loopback", credentials: "omit", cache: "no-store", redirect: "error",
-    });
-    if (response.ok) {
-      const { token } = await response.json();
-      if (typeof token === "string" && /^[\w-]{43}$/.test(token)) return { origin: pcDownloadOrigin, token, pcLocal: true };
+async function pcDownloadPermissionDenied() {
+  if (location.origin === pcDownloadOrigin || !navigator.permissions) return false;
+  for (const name of ["loopback-network", "local-network-access"]) {
+    try {
+      return (await navigator.permissions.query({ name })).state === "denied";
+    } catch {
+      // Older browsers may only support the original permission name.
     }
-  } catch (error) {
-    if (signal.aborted) throw error;
   }
-  throw new DownloadConnectionError(pcDownloadUnavailable);
+  return false;
+}
+
+async function readPCDownloadConnection(signal, starting) {
+  const deadline = Date.now() + (starting ? pcDownloadStartupWait : 0);
+  for (;;) {
+    signal.throwIfAborted();
+    const timeout = starting ? Math.max(1, Math.min(30_000, deadline - Date.now())) : 30_000;
+    let response;
+    try {
+      response = await fetch(pcDownloadOrigin + "/api/pc-download/session", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
+        targetAddressSpace: "loopback", credentials: "omit", cache: "no-store", redirect: "error",
+      });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      if (await pcDownloadPermissionDenied()) {
+        throw new DownloadConnectionError("ブラウザが接続をブロックしています。アドレス左のサイト設定で「ローカルネットワーク」または「ループバックネットワーク」へのアクセスを許可してください。");
+      }
+      if (!starting && error.name === "TimeoutError") {
+        throw new DownloadConnectionError("PCの応答がありません。ブラウザに接続の確認が出ていれば「許可」を押し、もう一度接続を確認してください。");
+      }
+      if (Date.now() < deadline) {
+        await waitForDownloadRetry(signal);
+        continue;
+      }
+      throw new DownloadConnectionError("PCの取得機能から応答がありません。起動の確認で「開く」を選ぶか、「Windows版を開く.cmd」を実行してください。");
+    }
+    const details = response.ok ? await response.json().catch(() => null) : null;
+    signal.throwIfAborted();
+    if (typeof details?.token === "string" && /^[\w-]{43}$/.test(details.token)) {
+      return { origin: pcDownloadOrigin, token: details.token, pcLocal: true };
+    }
+    throw new DownloadConnectionError("PCの取得機能の応答を確認できません。Windows版を開き直してお試しください。");
+  }
 }
 
 async function downloadVideoPage(url, format, request, signal, showProgress) {
@@ -408,6 +440,8 @@ function setupMediaDownloads(saveMedia) {
   const settingsButton = find("download-settings");
   const skipEstimate = find("download-skip-estimate");
   const pcLocal = find("download-pc-local");
+  const pcCheck = find("download-pc-check");
+  const pcMessage = find("download-pc-message");
   const csvButton = find("download-csv-button");
   const csvInput = find("download-csv-input");
   const csvMessage = find("download-csv-message");
@@ -428,6 +462,7 @@ function setupMediaDownloads(saveMedia) {
   let job;
   let approval;
   let importing = false;
+  let pcConnectedAt = 0;
 
   function setRowState(row, state = "", text = "", active = false, percent) {
     row.element.dataset.state = state;
@@ -573,7 +608,9 @@ function setupMediaDownloads(saveMedia) {
 
   function updateControls() {
     const locked = Boolean(job || approval || importing);
-    for (const element of [settingsButton, skipEstimate, pcLocal, csvButton]) element.disabled = locked;
+    for (const element of [settingsButton, skipEstimate, pcLocal, csvButton, pcCheck]) element.disabled = locked;
+    pcCheck.hidden = !onWindows || !pcLocal.checked;
+    pcMessage.hidden = pcCheck.hidden;
     for (const row of rows) {
       row.input.disabled = locked;
       row.clear.disabled = locked || !row.input.value.trim();
@@ -625,9 +662,33 @@ function setupMediaDownloads(saveMedia) {
     return { items, excluded };
   }
 
-  async function requestFor(direct, signal) {
-    if (direct) showProgress("PCの取得機能に接続しています…");
-    const connection = direct ? await readPCDownloadConnection(signal) : readDownloadConnection();
+  function startPCHelper(direct) {
+    if (!direct || !onWindows || job) return false;
+    if (Date.now() - pcConnectedAt < 60_000) return false;
+    // Keep the external app launch in the button's click handler.
+    location.href = pcDownloadLaunchUrl;
+    return true;
+  }
+
+  async function connectToPC(signal, starting) {
+    try {
+      const connection = await readPCDownloadConnection(signal, starting);
+      pcConnectedAt = Date.now();
+      return connection;
+    } catch (error) {
+      pcConnectedAt = 0;
+      throw error;
+    }
+  }
+
+  async function requestFor(direct, signal, starting) {
+    if (direct) {
+      pcMessage.textContent = "";
+      showProgress(starting
+        ? "PCの取得機能を起動しています。「開く」が表示されたら押してください。"
+        : "PCの取得機能に接続しています…");
+    }
+    const connection = direct ? await connectToPC(signal, starting) : readDownloadConnection();
     return createDownloadRequest(connection, signal, showProgress);
   }
 
@@ -660,6 +721,7 @@ function setupMediaDownloads(saveMedia) {
       message.textContent = "容量を確認できる項目がありません。各行の表示を確認してください。";
       return;
     }
+    if (direct) pcConnectedAt = Date.now();
     message.textContent = "";
     showEstimate(eligible, direct, excluded);
   }
@@ -696,20 +758,27 @@ function setupMediaDownloads(saveMedia) {
     message.textContent = saved + "件を端末に保存しました。" + (failed ? "未保存 " + failed + "件" : "");
   }
 
-  async function runTask(operation) {
+  async function runTask(operation, feedback = message) {
     if (job) return;
     const controller = new AbortController();
     job = controller;
     const { signal } = controller;
     updateControls();
-    message.textContent = "";
+    feedback.textContent = "";
     try {
       if (!/^https?:$/.test(location.protocol)) {
         throw new Error("この機能はGitHub Pagesの公開ページか、Windowsのローカルサーバーで使えます。");
       }
       await operation(signal);
     } catch (error) {
-      message.textContent = signal.aborted ? "処理を中止しました。保存済みの項目はライブラリに残ります。" : error.message;
+      if (signal.aborted) {
+        feedback.textContent = feedback === message
+          ? "処理を中止しました。保存済みの項目はライブラリに残ります。"
+          : "接続確認を中止しました。";
+      } else {
+        feedback.textContent = error.message;
+        if (error instanceof DownloadConnectionError) pcConnectedAt = 0;
+      }
     } finally {
       job = null;
       progress.hidden = true;
@@ -741,6 +810,17 @@ function setupMediaDownloads(saveMedia) {
     }
   });
   cancel.addEventListener("click", () => job?.abort());
+  pcLocal.addEventListener("change", updateControls);
+  pcCheck.addEventListener("click", () => {
+    const starting = startPCHelper(pcLocal.checked);
+    runTask(async (signal) => {
+      pcMessage.textContent = starting
+        ? "PCの取得機能を起動しています。「開く」が表示されたら押してください。"
+        : "PCの取得機能に接続しています…";
+      await connectToPC(signal, starting);
+      pcMessage.textContent = "PCの取得機能に接続できました。";
+    }, pcMessage);
+  });
   csvButton.addEventListener("click", () => csvInput.click());
   csvInput.addEventListener("change", async () => {
     const file = csvInput.files[0];
@@ -783,8 +863,9 @@ function setupMediaDownloads(saveMedia) {
     }
     const direct = pcLocal.checked;
     const skip = skipEstimate.checked;
+    const starting = startPCHelper(direct);
     runTask(async (signal) => {
-      const request = await requestFor(direct, signal);
+      const request = await requestFor(direct, signal, starting);
       if (skip) await saveBatch(items, excluded, request, signal);
       else await checkBatch(items, direct, excluded, request, signal);
     });
@@ -793,8 +874,9 @@ function setupMediaDownloads(saveMedia) {
     if (!approval) return;
     const { items, direct, excluded } = approval;
     approval = null;
+    const starting = startPCHelper(direct);
     runTask(async (signal) => {
-      const request = await requestFor(direct, signal);
+      const request = await requestFor(direct, signal, starting);
       await saveBatch(items, excluded, request, signal);
     });
   });

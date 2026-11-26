@@ -92,6 +92,14 @@ button:disabled { opacity: .44; cursor: default; }
 #library { min-width: 0; isolation: isolate; }
 .library-actions { display: flex; justify-content: flex-end; gap: 4px; }
 .library-actions > .library-icon { position: relative; }
+.library-actions > .library-icon::before {
+  content: "";
+  position: absolute;
+  inset: 7px;
+  border-radius: var(--control-radius);
+  pointer-events: none;
+  transition: background-color 140ms ease;
+}
 .library-actions > .library-icon svg { position: relative; }
 .library-icon {
   display: inline-grid;
@@ -106,7 +114,9 @@ button:disabled { opacity: .44; cursor: default; }
 }
 .library-icon svg { width: 21px; height: 21px; }
 #library-settings { color: var(--muted); }
-.library-icon[aria-pressed="true"] { color: var(--accent-ink); background: var(--accent-fill); }
+.library-icon[aria-pressed="true"] { color: var(--accent-ink); }
+.library-icon[aria-pressed="true"]:not(.library-actions > .library-icon),
+.library-actions > .library-icon[aria-pressed="true"]::before { background-color: var(--accent-fill); }
 #new-folder svg { width: 23px; height: 23px; }
 #delete-mode svg {
   grid-area: 1 / 1;
@@ -1422,12 +1432,7 @@ body[data-video-expanded]:not([data-video-controls]) .player-controls {
     background-color: var(--hover);
   }
   .library-actions > .library-icon:hover:not(:disabled, [aria-pressed="true"])::before {
-    content: "";
-    position: absolute;
-    inset: 7px;
-    border-radius: var(--control-radius);
     background-color: var(--hover);
-    pointer-events: none;
   }
   .connection-settings:hover:not(:disabled) { color: var(--accent); }
   .connection-settings:hover:not(:disabled) > span { transform: translateX(3px); }
