@@ -10,11 +10,11 @@
   <link rel="icon" href="icon-192.png?v=40">
   <link rel="apple-touch-icon" href="icon-192.png?v=40">
   <link rel="manifest" href="manifest.webmanifest?v=40">
-  <link rel="stylesheet" href="style.css?v=40.1">
+  <link rel="stylesheet" href="style.css?v=41">
   <script src="storage.js?v=27" defer></script>
   <script src="artwork.js?v=4" defer></script>
   <script src="queue.js?v=24" defer></script>
-  <script src="download.js?v=39" defer></script>
+  <script src="download.js?v=41" defer></script>
   <script src="pc-transfer.js?v=39" defer></script>
   <script src="app.js?v=40" defer></script>
 </head>
@@ -49,7 +49,7 @@
         <button type="button" id="folder-back" hidden>‹ ライブラリ</button>
         <div class="library-title-row">
           <h1 id="library-title" tabindex="-1">ライブラリ</h1>
-          <span id="app-version" aria-label="バージョン40">v40</span>
+          <span id="app-version" aria-label="バージョン41">v41</span>
         </div>
         <div class="library-summary">
           <span id="track-count">0 曲</span>
@@ -213,11 +213,15 @@
           <path d="m13 6 9 5-9 5Z" fill="#fff"/>
         </svg>
       </a>
+      <button type="button" id="download-csv-button" class="action action-secondary">CSVを取り込む</button>
+      <input type="file" id="download-csv-input" accept=".csv,text/csv" hidden>
       <div class="download-toggles">
         <label id="download-pc-option" hidden><input type="checkbox" id="download-pc-local">PCから直接取得</label>
         <label><input type="checkbox" id="download-skip-estimate">容量確認を省略</label>
       </div>
     </div>
+    <p id="download-csv-message" class="feedback download-list-message" role="status"></p>
+    <p id="download-queue-message" class="feedback download-list-message" role="status"></p>
     <ol id="download-rows" aria-label="ダウンロード一覧"></ol>
     <template id="download-row-template">
       <li class="download-row download-grid">
@@ -228,6 +232,7 @@
           <label><input type="radio" value="mp4" checked><span>MP4</span></label>
           <label><input type="radio" value="mp3"><span>MP3</span></label>
         </div>
+        <button type="button" class="library-icon download-clear" aria-label="登録をクリア"><svg class="ui-icon" aria-hidden="true"><use href="#icon-close"/></svg></button>
         <div class="download-row-info" hidden>
           <span class="download-row-status"></span>
           <progress class="download-row-progress" max="100" hidden></progress>

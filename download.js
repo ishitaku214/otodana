@@ -2,6 +2,7 @@
 
 const downloadLimit = 128_000_000;
 const downloadConnectionKey = "otodana-download-connection";
+const downloadQueueKey = "otodana-download-queue";
 const pcDownloadOrigin = "http://127.0.0.1:8787";
 const pcDownloadUnavailable = "PCの取得機能に接続できません。「Windows版を開く.cmd」を開き、ブラウザに接続の確認が出たら許可してください。";
 
@@ -351,6 +352,53 @@ function summarizeDownloadSize(items, field) {
     + (unknown ? " ＋ " + unknown + "件は不明" : "");
 }
 
+function downloadPageUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:" && !url.port && !url.username && !url.password) return url;
+  } catch {
+    // Leave invalid links editable in the download list.
+  }
+  return null;
+}
+
+function readDownloadCsv(text) {
+  const source = text.replace(/^\uFEFF/, "");
+  const fieldPattern = /"((?:[^"]|"")*)"|([^",\r\n]*)/y;
+  const records = [];
+  let record = [];
+  while (fieldPattern.lastIndex < source.length) {
+    const field = fieldPattern.exec(source);
+    const end = fieldPattern.lastIndex;
+    const separator = source[end];
+    if (separator && !",\r\n".includes(separator)) {
+      throw new Error("CSVの引用符を確認してください。");
+    }
+    record.push(field[1]?.replace(/""/g, '"') ?? field[2]);
+    if (separator !== ",") {
+      if (record.some((cell) => cell.trim())) records.push(record);
+      record = [];
+    }
+    if (!separator) break;
+    fieldPattern.lastIndex += source.startsWith("\r\n", end) ? 2 : 1;
+  }
+  if (record.some((cell) => cell.trim())) records.push(record);
+
+  const header = records[0]?.map((cell) => cell.trim().toLowerCase()) ?? [];
+  const urlColumn = header.indexOf("url");
+  const formatColumn = urlColumn === -1 ? 1 : header.findIndex((cell) => ["保存形式", "形式", "format"].includes(cell));
+  if (urlColumn !== -1) records.shift();
+  const items = [];
+  let skipped = 0;
+  for (const cells of records) {
+    const url = cells[Math.max(0, urlColumn)]?.trim() ?? "";
+    const format = cells[formatColumn]?.trim().toLowerCase() || "mp4";
+    if (downloadPageUrl(url) && ["mp3", "mp4"].includes(format)) items.push({ url, format });
+    else skipped++;
+  }
+  return { items, skipped };
+}
+
 function setupMediaDownloads(saveMedia) {
   setupDownloadSettings();
   const find = (id) => document.getElementById(id);
@@ -360,6 +408,10 @@ function setupMediaDownloads(saveMedia) {
   const settingsButton = find("download-settings");
   const skipEstimate = find("download-skip-estimate");
   const pcLocal = find("download-pc-local");
+  const csvButton = find("download-csv-button");
+  const csvInput = find("download-csv-input");
+  const csvMessage = find("download-csv-message");
+  const queueMessage = find("download-queue-message");
   const onWindows = location.origin === pcDownloadOrigin || /^Win/i.test(navigator.userAgentData?.platform ?? navigator.platform);
   find("download-pc-option").hidden = !onWindows;
   pcLocal.checked = onWindows;
@@ -375,6 +427,7 @@ function setupMediaDownloads(saveMedia) {
   let nextRowId = 0;
   let job;
   let approval;
+  let importing = false;
 
   function setRowState(row, state = "", text = "", active = false, percent) {
     row.element.dataset.state = state;
@@ -426,6 +479,7 @@ function setupMediaDownloads(saveMedia) {
       row.element.querySelector(".download-number").textContent = number;
       row.input.setAttribute("aria-label", number + "件目の動画の共有リンク");
       row.element.querySelector(".download-format").setAttribute("aria-label", number + "件目の保存形式");
+      row.clear.setAttribute("aria-label", number + "件目の登録をクリア");
       row.progress.setAttribute("aria-label", number + "件目の進み具合");
     });
   }
@@ -436,8 +490,19 @@ function setupMediaDownloads(saveMedia) {
     rows.splice(rows.indexOf(row), 1);
   }
 
-  function ensureBlankRow() {
-    if (rows.length && !rows.at(-1).input.value.trim()) return;
+  function persistRows() {
+    const entries = rows.filter((row) => row.input.value.trim())
+      .map((row) => ({ url: row.input.value, format: row.formats.find((format) => format.checked).value }));
+    try {
+      if (entries.length) localStorage.setItem(downloadQueueKey, JSON.stringify(entries));
+      else localStorage.removeItem(downloadQueueKey);
+      queueMessage.textContent = "";
+    } catch {
+      queueMessage.textContent = "登録一覧を端末に保存できません。画面を閉じると変更が失われる場合があります。";
+    }
+  }
+
+  function appendRow(url = "", format = "mp4") {
     const element = template.content.firstElementChild.cloneNode(true);
     const query = (selector) => element.querySelector(selector);
     const row = {
@@ -448,17 +513,24 @@ function setupMediaDownloads(saveMedia) {
       info: query(".download-row-info"),
       status: query(".download-row-status"),
       progress: query(".download-row-progress"),
+      clear: query(".download-clear"),
       previewUrl: null,
     };
     const group = "download-format-" + (++nextRowId);
-    for (const format of row.formats) {
-      format.name = group;
-      format.addEventListener("change", () => setRowState(row));
+    row.input.value = url;
+    for (const option of row.formats) {
+      option.name = group;
+      option.checked = option.value === format;
+      option.addEventListener("change", () => {
+        setRowState(row);
+        persistRows();
+      });
     }
     row.input.addEventListener("input", () => {
       setRowState(row);
       updatePreview(row);
       ensureBlankRow();
+      persistRows();
       updateControls();
     });
     row.input.addEventListener("blur", () => {
@@ -467,21 +539,49 @@ function setupMediaDownloads(saveMedia) {
       numberRows();
       updateControls();
     });
+    row.clear.addEventListener("click", () => {
+      if (job || approval || importing || !rows.includes(row)) return;
+      removeRow(row);
+      ensureBlankRow();
+      numberRows();
+      persistRows();
+      updateControls();
+    });
     rows.push(row);
     list.append(element);
+  }
+
+  function ensureBlankRow() {
+    if (rows.at(-1)?.input.value.trim() === "") return;
+    appendRow();
     numberRows();
   }
 
+  function restoreRows() {
+    try {
+      const entries = JSON.parse(localStorage.getItem(downloadQueueKey) ?? "[]");
+      if (!Array.isArray(entries)) return;
+      for (const entry of entries) {
+        if (typeof entry?.url === "string" && entry.url.trim()) {
+          appendRow(entry.url, entry.format === "mp3" ? "mp3" : "mp4");
+        }
+      }
+    } catch {
+      queueMessage.textContent = "前回の登録一覧を読み込めませんでした。";
+    }
+  }
+
   function updateControls() {
-    const locked = Boolean(job || approval);
-    for (const element of [settingsButton, skipEstimate, pcLocal]) element.disabled = locked;
+    const locked = Boolean(job || approval || importing);
+    for (const element of [settingsButton, skipEstimate, pcLocal, csvButton]) element.disabled = locked;
     for (const row of rows) {
       row.input.disabled = locked;
-      for (const format of row.formats) format.disabled = locked || row.saved;
+      row.clear.disabled = locked || !row.input.value.trim();
+      for (const format of row.formats) format.disabled = locked;
     }
     estimatePanel.hidden = !approval;
     start.hidden = Boolean(approval);
-    start.disabled = locked || !rows.some((row) => !row.saved && row.input.value.trim());
+    start.disabled = locked || !rows.some((row) => row.input.value.trim());
     start.textContent = skipEstimate.checked ? "一括保存を開始" : "全件の容量を確認";
     confirm.disabled = Boolean(job);
     cancel.hidden = !job;
@@ -512,10 +612,9 @@ function setupMediaDownloads(saveMedia) {
     let excluded = 0;
     for (const row of rows) {
       const value = row.input.value.trim();
-      if (row.saved || !value) continue;
-      let url;
-      try { url = new URL(value); } catch { /* Invalid rows stay editable. */ }
-      if (!url || url.protocol !== "https:" || url.port || url.username || url.password) {
+      if (!value) continue;
+      const url = downloadPageUrl(value);
+      if (!url) {
         setRowState(row, "error", "動画のHTTPSリンクを入力してください。");
         excluded++;
         continue;
@@ -582,9 +681,10 @@ function setupMediaDownloads(saveMedia) {
         const name = (input.name ?? "").replace(/\.[a-z0-9]{1,6}$/i, "")
           .replace(/[\\/:*?"<>|\p{Cc}]+/gu, " ").trim();
         await saveMedia(input.blob, (name.slice(0, 180) || "ダウンロード") + "." + format, format, cover);
-        row.saved = row.input.readOnly = true;
         saved++;
-        setRowState(row, "saved", "端末に保存しました · " + displayDownloadSize(input.blob.size));
+        removeRow(row);
+        numberRows();
+        persistRows();
       } catch (error) {
         setRowState(row, "error", signal.aborted ? "保存を中止しました。" : error.message);
         if (signal.aborted || error instanceof DownloadConnectionError) throw error;
@@ -622,10 +722,8 @@ function setupMediaDownloads(saveMedia) {
     if (dialog.open) return;
     find("add-dialog").close();
     if (!job) {
-      for (const row of rows.filter((entry) => entry.saved)) removeRow(row);
-      ensureBlankRow();
-      numberRows();
       message.textContent = "";
+      for (const row of rows) updatePreview(row);
     }
     updateControls();
     dialog.showModal();
@@ -643,6 +741,34 @@ function setupMediaDownloads(saveMedia) {
     }
   });
   cancel.addEventListener("click", () => job?.abort());
+  csvButton.addEventListener("click", () => csvInput.click());
+  csvInput.addEventListener("change", async () => {
+    const file = csvInput.files[0];
+    csvInput.value = "";
+    if (!file || job || approval || importing) return;
+    importing = true;
+    updateControls();
+    try {
+      const { items, skipped } = readDownloadCsv(await file.text());
+      if (items.length) {
+        const blank = rows.at(-1);
+        if (blank && !blank.input.value.trim()) removeRow(blank);
+        for (const { url, format } of items) {
+          appendRow(url, format);
+          if (dialog.open) updatePreview(rows.at(-1));
+        }
+        ensureBlankRow();
+        persistRows();
+      }
+      csvMessage.textContent = items.length ? items.length + "件を追加しました。" : "取り込めるURLがありませんでした。";
+      if (skipped) csvMessage.textContent += " URLまたは形式を確認できない " + skipped + "件はスキップしました。";
+    } catch (error) {
+      csvMessage.textContent = error.message || "CSVを読み込めませんでした。";
+    } finally {
+      importing = false;
+      updateControls();
+    }
+  });
   skipEstimate.addEventListener("change", updateControls);
   find("download-estimate-back").addEventListener("click", () => {
     approval = null;
@@ -673,6 +799,7 @@ function setupMediaDownloads(saveMedia) {
     });
   });
 
+  restoreRows();
   ensureBlankRow();
   updateControls();
 }
