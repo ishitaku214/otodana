@@ -344,7 +344,7 @@ function setupDownloadSettings(setScreenActivity) {
   });
 }
 
-function youtubePreviewUrl(value) {
+function youtubePreviewUrl(value, size = "mqdefault") {
   let url;
   try { url = new URL(value); } catch { return null; }
   if (url.protocol !== "https:" || url.port || url.username || url.password) return null;
@@ -356,26 +356,58 @@ function youtubePreviewUrl(value) {
     id = url.pathname === "/watch" ? url.searchParams.get("v")
       : url.pathname.match(/^\/(?:shorts|live)\/([\w-]{11})\/?$/)?.[1];
   }
-  return id && /^[\w-]{11}$/.test(id) ? "https://i.ytimg.com/vi/" + id + "/mqdefault.jpg" : null;
+  return id && /^[\w-]{11}$/.test(id) ? "https://i.ytimg.com/vi/" + id + "/" + size + ".jpg" : null;
 }
 
 function youtubeWatchUrl(id) {
   return "https://www.youtube.com/watch?v=" + id;
 }
 
-async function squareAudioArtwork(image, cover) {
+async function fetchYoutubeArtwork(url, signal) {
+  if (!url || signal.aborted) return null;
   try {
+    const response = await fetch(url, {
+      signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]),
+      credentials: "omit", referrerPolicy: "no-referrer",
+    });
+    const type = response.headers.get("Content-Type")?.split(";")[0];
+    if (!response.ok || type !== "image/jpeg" || Number(response.headers.get("Content-Length")) > 2_000_000) return null;
+    const cover = await response.blob();
+    return !signal.aborted && cover.size > 0 && cover.size <= 2_000_000 ? cover : null;
+  } catch {
+    return null;
+  }
+}
+
+async function squareAudioArtwork(cover, minimumSide = 1) {
+  if (!cover) return null;
+  const url = URL.createObjectURL(cover);
+  try {
+    const image = new Image();
+    image.src = url;
     await image.decode();
     const { naturalWidth: width, naturalHeight: height } = image;
-    if (width === height) return cover;
     const side = Math.min(width, height);
+    if (side < minimumSide) return null;
+    if (width === height && side <= 768) return cover;
+    const outputSide = Math.min(side, 768);
     const canvas = document.createElement("canvas");
-    canvas.width = canvas.height = side;
-    canvas.getContext("2d").drawImage(image, (width - side) / 2, (height - side) / 2, side, side, 0, 0, side, side);
-    return (await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", .9))) ?? cover;
+    canvas.width = canvas.height = outputSide;
+    canvas.getContext("2d").drawImage(image, (width - side) / 2, (height - side) / 2, side, side, 0, 0, outputSide, outputSide);
+    return await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", .94));
   } catch {
-    return cover;
+    return null;
+  } finally {
+    URL.revokeObjectURL(url);
   }
+}
+
+async function audioDownloadArtwork(mediaUrl, preview, signal) {
+  const original = await fetchYoutubeArtwork(youtubePreviewUrl(mediaUrl, "maxresdefault"), signal);
+  const cover = await squareAudioArtwork(original, 320);
+  if (cover || signal.aborted) return cover;
+  const fallback = await preview;
+  return (await squareAudioArtwork(fallback)) ?? fallback;
 }
 
 async function estimateDownload(item, request) {
@@ -531,22 +563,12 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
     if (!url) return;
     const controller = new AbortController();
     row.preview = controller;
-    row.cover = (async () => {
-      try {
-        const response = await fetch(url, {
-          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]),
-          credentials: "omit", referrerPolicy: "no-referrer",
-        });
-        if (!response.ok || response.headers.get("Content-Type")?.split(";")[0] !== "image/jpeg") return null;
-        const cover = await response.blob();
-        if (controller.signal.aborted || !cover.size || cover.size > 2_000_000) return null;
-        row.image.src = URL.createObjectURL(cover);
-        row.image.hidden = false;
-        return cover;
-      } catch {
-        return null;
-      }
-    })();
+    row.cover = fetchYoutubeArtwork(url, controller.signal).then((cover) => {
+      if (!cover || controller.signal.aborted) return null;
+      row.image.src = URL.createObjectURL(cover);
+      row.image.hidden = false;
+      return cover;
+    });
   }
 
   function numberRows() {
@@ -950,8 +972,7 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
         updatePreview(row);
         const input = await downloadVideoPage(item, request, signal,
           (text, percent) => setRowState(row, "", text, true, percent));
-        const thumbnail = await row.cover;
-        const cover = thumbnail && format !== "mp4" ? await squareAudioArtwork(row.image, thumbnail) : thumbnail;
+        const cover = format === "mp4" ? await row.cover : await audioDownloadArtwork(item.url, row.cover, signal);
         signal.throwIfAborted();
         setRowState(row, "", "ライブラリに保存しています…", true);
         cancel.disabled = close.disabled = true;

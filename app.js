@@ -1736,6 +1736,13 @@ function matchingTracks(entries, query) {
     .some((value) => value && containsQuery(value, query)));
 }
 
+function selectionRange(entries, anchor, target) {
+  const first = entries.indexOf(anchor);
+  const last = entries.indexOf(target);
+  if (first < 0 || last < 0) return [];
+  return entries.slice(Math.min(first, last), Math.max(first, last) + 1);
+}
+
 function moveIntoFolder(entries, folder) {
   for (const track of entries) {
     if (track.folder) track.folder.tracks = track.folder.tracks.filter((entry) => entry !== track);
@@ -1949,7 +1956,7 @@ function renderFolders(query) {
 }
 
 function setTrackSelection(mode, folder = activeFolder) {
-  trackSelection = mode ? { folder, mode, chosen: new Set() } : null;
+  trackSelection = mode ? { folder, mode, chosen: new Set(), anchor: null } : null;
   get("selection-cancel").disabled = false;
   selectionBar.hidden = !mode;
   selectionTitle.hidden = !mode;
@@ -2000,13 +2007,24 @@ function renderTracks() {
     select.type = "button";
     select.className = "track-select";
     select.innerHTML = '<span class="thumb" aria-hidden="true"><img alt="" hidden></span><span class="track-copy"><span class="track-name"></span><span class="track-artist" hidden></span></span>';
-    select.addEventListener("click", () => {
+    select.addEventListener("click", (event) => {
       if (trackSelection) {
-        if (trackSelection.saving || (trackSelection.mode === "delete" && track.busy)) return;
-        const { chosen } = trackSelection;
-        if (!chosen.delete(track)) chosen.add(track);
+        const { chosen, mode, anchor, saving } = trackSelection;
+        if (saving || (mode === "delete" && track.busy)) return;
+        const visibleRows = event.shiftKey && anchor ? Array.from(list.children) : [];
+        const range = selectionRange(visibleRows, visibleRows.find((item) => item.track === anchor), row);
+        if (range.length) {
+          for (const item of range) {
+            if (mode === "delete" && item.track.busy) continue;
+            chosen.add(item.track);
+            updateSelectionRow(item);
+          }
+        } else {
+          if (!chosen.delete(track)) chosen.add(track);
+          trackSelection.anchor = track;
+          updateSelectionRow(row);
+        }
         selectionConfirm.disabled = !chosen.size;
-        updateSelectionRow(row);
         return;
       }
       selectTrack(track, false, matches, query);
@@ -3100,6 +3118,7 @@ setupPCTransfer({
     return (await trackStore.run(database, "readonly", (store) => store.index("pcTransferId").getKey(pcTransferId))) !== undefined;
   },
   saveTrack: savePCTrack,
+  selectionRange,
   displayTitle: trackTitle,
   displayArtist: trackArtist,
   showThumbnail: showTrackThumbnail,

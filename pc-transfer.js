@@ -353,6 +353,7 @@ function setupPCTransfer(library, setScreenActivity) {
   const visibleChoices = new Map();
   let contents = { root: [], folders: [] };
   let folder = null;
+  let rangeAnchor = null;
   let choicesRevision = 0;
   let controller;
   let lastProgress = 0;
@@ -458,9 +459,27 @@ function setupPCTransfer(library, setScreenActivity) {
     checkbox.disabled = !canSend;
     if (canSend) {
       visibleChoices.set(track, checkbox);
-      checkbox.addEventListener("change", () => {
+      row.addEventListener("click", (event) => {
+        if (checkbox.disabled) return;
+        const range = event.shiftKey && rangeAnchor
+          ? library.selectionRange([...visibleChoices.keys()], rangeAnchor, track) : [];
+        if (range.length) {
+          // Suppress the label's forwarded click. A direct checkbox click has already toggled it.
+          if (event.target !== checkbox) {
+            event.preventDefault();
+            checkbox.focus({ preventScroll: true });
+          }
+          for (const item of range) {
+            chosen.add(item);
+            visibleChoices.get(item).checked = true;
+          }
+          updateControls();
+          return;
+        }
+        if (event.target !== checkbox) return;
         if (checkbox.checked) chosen.add(track);
         else chosen.delete(track);
+        rangeAnchor = track;
         updateControls();
       });
     }
@@ -470,6 +489,7 @@ function setupPCTransfer(library, setScreenActivity) {
   function renderChoices() {
     artworkObserver?.disconnect();
     visibleChoices.clear();
+    rangeAnchor = null;
     find("folder-heading").hidden = !folder;
     find("folder-name").textContent = folder?.name ?? "";
     const entries = folder?.tracks ?? contents.root;
@@ -503,6 +523,7 @@ function setupPCTransfer(library, setScreenActivity) {
   }
 
   function selectVisible(checked) {
+    rangeAnchor = null;
     for (const [track, checkbox] of visibleChoices) {
       checkbox.checked = checked;
       if (checked) chosen.add(track);
