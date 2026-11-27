@@ -10,13 +10,13 @@
   <link rel="icon" href="icon-192.png?v=40">
   <link rel="apple-touch-icon" href="icon-192.png?v=40">
   <link rel="manifest" href="manifest.webmanifest?v=40">
-  <link rel="stylesheet" href="style.css?v=50">
+  <link rel="stylesheet" href="style.css?v=52">
   <script src="storage.js?v=50" defer></script>
   <script src="artwork.js?v=50" defer></script>
   <script src="queue.js?v=24" defer></script>
-  <script src="download.js?v=50" defer></script>
+  <script src="download.js?v=53" defer></script>
   <script src="pc-transfer.js?v=46" defer></script>
-  <script src="app.js?v=50" defer></script>
+  <script src="app.js?v=52" defer></script>
 </head>
 <body data-view="library">
   <svg class="icon-definitions" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
@@ -52,7 +52,7 @@
         <button type="button" id="folder-back" hidden>‹ ライブラリ</button>
         <div class="library-title-row">
           <h1 id="library-title" tabindex="-1">ライブラリ</h1>
-          <span id="app-version" aria-label="バージョン50">v50</span>
+          <span id="app-version" aria-label="バージョン53">v53</span>
         </div>
         <div class="library-summary">
           <span id="track-count">0 曲</span>
@@ -165,7 +165,6 @@
         </div>
         <div class="player-foot">
           <div class="player-tools">
-            <button type="button" id="video-audio-mode" class="player-actions" aria-pressed="false" hidden>音声のみ</button>
             <button type="button" id="queue-toggle" class="player-actions" aria-label="次に再生する曲を表示" aria-controls="queue-panel" aria-pressed="false" hidden><svg class="ui-icon" aria-hidden="true"><use href="#icon-queue"/></svg><span>再生リスト</span></button>
             <button id="video-fullscreen" class="player-actions" type="button" aria-label="動画を全画面" hidden disabled>
               <svg class="video-expand-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5m6 0h5v5m0 6v5h-5m-6 0H4v-5"/></svg>
@@ -254,12 +253,7 @@
       </div>
       <button type="button" id="download-csv-button" class="action action-secondary">CSVを取り込む</button>
       <input type="file" id="download-csv-input" accept=".csv,text/csv" hidden>
-      <div class="download-toggles">
-        <label><input type="checkbox" id="download-skip-estimate">容量確認を省略</label>
-      </div>
-      <button type="button" id="download-pc-check" class="action action-secondary" hidden>PC接続を確認</button>
     </div>
-    <p id="download-pc-message" class="feedback download-list-message" role="status" hidden></p>
     <p id="download-csv-message" class="feedback download-list-message" role="status"></p>
     <p id="download-queue-message" class="feedback download-list-message" role="status"></p>
     <ol id="download-rows" aria-label="ダウンロード一覧"></ol>
@@ -277,7 +271,7 @@
           </div>
           <div class="download-media-options">
             <div class="download-format" role="group">
-              <label><input type="radio" value="mp4" checked><span>MP4</span></label>
+              <label><input type="radio" value="mp4" checked><span>動画</span></label>
               <label><input type="radio" value="audio"><span>音声</span></label>
             </div>
             <div class="download-row-choice">
@@ -300,15 +294,19 @@
         </div>
       </li>
     </template>
-    <div class="dialog-actions">
+    <div id="download-start-actions" class="download-split">
       <button type="button" id="download-start" class="action action-primary" disabled>曲情報と容量を確認</button>
+      <button type="button" id="download-more" class="action action-primary" aria-label="ダウンロードのオプション" aria-expanded="false" aria-controls="download-start-options" disabled>
+        <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>
+      </button>
+      <div id="download-start-options" hidden>
+        <button type="button" id="download-skip" class="action action-secondary">容量確認を省略してダウンロード</button>
+      </div>
     </div>
     <section id="download-estimate" aria-labelledby="download-estimate-title" hidden>
       <h3 id="download-estimate-title">保存前の確認</h3>
-      <dl id="download-estimate-sizes">
-        <dt>配信元から取得する合計</dt>
-        <dd id="download-estimate-source"></dd>
-        <dt>端末に保存する容量</dt>
+      <dl>
+        <dt>端末に保存する合計容量</dt>
         <dd id="download-estimate-output"></dd>
       </dl>
       <p id="download-estimate-note" class="feedback" hidden></p>

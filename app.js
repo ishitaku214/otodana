@@ -12,7 +12,6 @@ const desktopPlayback = /^(Win|Mac|Linux|Chrome OS)/i.test(playbackPlatform) &&
 if (desktopPlayback) audio.volume = video.volume = desktopPlaybackVolume;
 const videoStage = get("video-stage");
 const videoFullscreen = get("video-fullscreen");
-const videoAudioMode = get("video-audio-mode");
 const videoSkip = get("video-skip");
 const videoSlot = get("artwork-stage").querySelector(".cover-space");
 const videoControls = document.querySelector(".player-controls");
@@ -20,7 +19,6 @@ const playerContent = document.querySelector(".player-content");
 const fullscreenRoot = document.documentElement;
 const playerCover = get("player-cover");
 let media = audio;
-let videoAudioOnly = false;
 const mediaFormats = {
   mp3: "audio/mpeg",
   wav: "audio/wav",
@@ -48,6 +46,7 @@ const queueToggle = get("queue-toggle");
 const queuePanel = get("queue-panel");
 const queueCurrent = get("queue-current");
 const queueList = get("queue-list");
+const queueUpcoming = queueList.parentElement;
 const historyHeading = get("history-heading");
 const historyClear = get("history-clear");
 const historyList = get("history-list");
@@ -110,6 +109,8 @@ let database = null;
 let checkingStorage = true;
 let current = null;
 let objectUrl = null;
+let companionVideoUrl = null;
+const audioUnsupportedVideos = new WeakSet();
 let artworkUrl = null;
 let artworkTrack = null;
 let artworkRequest = 0;
@@ -292,8 +293,8 @@ function updatePlayback() {
   updateVideoTools();
   activeLibraryButton?.toggleAttribute("data-playing", playing);
   queueCurrent.toggleAttribute("data-playing", playing);
-  videoStage.toggleAttribute("data-playing", media === video && playing);
-  videoStage.toggleAttribute("data-ended", media === video && video.ended);
+  videoStage.toggleAttribute("data-playing", isVideo(current) && playing);
+  videoStage.toggleAttribute("data-ended", isVideo(current) && media.ended);
   scheduleVideoLayout();
 }
 
@@ -309,8 +310,10 @@ function isVideo(track) {
   return mediaFormats[track?.format]?.startsWith("video/") ?? false;
 }
 
-function supportsVideoAudio(track) {
-  return ["mp4", "m4v"].includes(track?.format) && Boolean(audio.canPlayType("audio/mp4"));
+function videoAudioType(track) {
+  if (desktopPlayback || !isVideo(track) || audioUnsupportedVideos.has(track)) return "";
+  const mime = track.format === "webm" ? "audio/webm" : "audio/mp4";
+  return audio.canPlayType(mime) ? mime : "";
 }
 
 function readMediaMetadata(track, includeArtwork = true) {
@@ -441,7 +444,7 @@ function renderQueue(anchor = false) {
   cancelQueueGesture();
   queueThumbnailObserver?.disconnect();
   const scroll = queuePanel.scrollTop;
-  get("queue-now-title").textContent = displayTrackTitle(current);
+  setMarquee(get("queue-now-title"), displayTrackTitle(current));
   get("queue-now-artist").textContent = trackArtist(current);
   const history = recordedCurrent ? queue.history.slice(0, -1) : queue.history;
   const historyRows = history.map((track) => {
@@ -515,16 +518,17 @@ function updateQueueViewport() {
   historyHeading.hidden = !showingQueue;
   if (!showingQueue) return;
 
-  const scroll = Math.max(0, queuePanel.scrollTop);
-  const distance = queueAnchor() - scroll;
-  const rowTop = Math.max(0, Math.min(distance, queuePanel.clientHeight - queueCurrent.offsetHeight));
+  const panelTop = queuePanel.getBoundingClientRect().top;
+  const pinned = queueCurrent.getBoundingClientRect();
+  const history = queueHistory.getBoundingClientRect();
+  const upcoming = queueUpcoming.getBoundingClientRect();
   const headingHeight = historyHeading.offsetHeight;
-  const showingHistory = headingHeight > 0 && rowTop > headingHeight;
+  const showingHistory = headingHeight > 0 && pinned.top - panelTop > headingHeight;
   historyHeading.toggleAttribute("data-visible", showingHistory);
-  // Fade the history under its heading and clip both lists behind the pinned row.
-  queuePanel.style.setProperty("--history-start", (scroll + (showingHistory ? headingHeight : -12)) + "px");
-  queuePanel.style.setProperty("--history-end", (scroll + rowTop) + "px");
-  queuePanel.style.setProperty("--upcoming-start", Math.max(0, -distance) + "px");
+  // Clip against the rendered sticky row, including subpixel scroll positions.
+  queuePanel.style.setProperty("--history-start", (panelTop + (showingHistory ? headingHeight : -12) - history.top) + "px");
+  queuePanel.style.setProperty("--history-overlap", Math.ceil(Math.max(0, history.bottom - pinned.top)) + "px");
+  queuePanel.style.setProperty("--upcoming-overlap", Math.ceil(Math.max(0, pinned.bottom - upcoming.top)) + "px");
 }
 
 function unlockQueueScroll() {
@@ -667,10 +671,7 @@ function updateSelection() {
   get("next").disabled = !current || !queue.hasNext;
   get("mini-next").disabled = get("next").disabled;
   toggle.disabled = !current;
-  const currentIsVideo = media === video && Boolean(current);
-  videoAudioMode.hidden = !supportsVideoAudio(current);
-  videoAudioMode.textContent = currentIsVideo ? "音声のみ" : "映像に戻す";
-  videoAudioMode.setAttribute("aria-pressed", String(!currentIsVideo && supportsVideoAudio(current)));
+  const currentIsVideo = isVideo(current);
   videoStage.hidden = !currentIsVideo;
   videoFullscreen.hidden = !currentIsVideo;
   playerCover.hidden = currentIsVideo;
@@ -719,10 +720,22 @@ async function play() {
   try {
     if (media.error) media.load();
     applyResumePosition();
-    await media.play();
+    const started = media.play();
+    syncCompanionVideo();
+    await started;
     if (request === playRequest) updatePlayback();
   } catch (error) {
     if (request !== playRequest) return;
+    if (companionVideoUrl && media.error) {
+      const track = current;
+      const position = resumePosition ?? media.currentTime;
+      const recorded = recordedCurrent;
+      audioUnsupportedVideos.add(track);
+      loadTrack(track, position);
+      recordedCurrent = recorded;
+      updateSelection();
+      return play();
+    }
     tellPlayer(error.name === "NotAllowedError"
       ? "再生ボタンを押して再生を始めてください。"
       : playbackError());
@@ -772,19 +785,26 @@ function setBackdrop(image) {
   });
 }
 
-function clearSource(nextMedia = audio) {
+function clearSource(nextIsVideo = false) {
   ++playRequest;
   seekDrag = null;
   resumePosition = null;
   media.pause();
-  if (media === video) {
-    if (nextMedia !== video) closeVideoExpanded();
+  if (media === video || companionVideoUrl) {
+    if (!nextIsVideo) closeVideoExpanded();
     clearVideoTaps();
   }
   media.removeAttribute("src");
   media.load();
   if (objectUrl) URL.revokeObjectURL(objectUrl);
   objectUrl = null;
+  if (companionVideoUrl) {
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    URL.revokeObjectURL(companionVideoUrl);
+    companionVideoUrl = null;
+  }
   video.removeAttribute("poster");
   videoPoster.hidden = true;
   videoPoster.removeAttribute("src");
@@ -921,29 +941,41 @@ function selectTrack(track, followQueue = false, scope, query = "") {
 }
 
 function loadTrack(track, position = null) {
-  const audioOnly = videoAudioOnly && supportsVideoAudio(track);
-  const nextMedia = isVideo(track) && !audioOnly ? video : audio;
-  clearSource(nextMedia);
+  const videoTrack = isVideo(track);
+  const audioType = videoAudioType(track);
+  clearSource(videoTrack);
   current = track;
-  media = nextMedia;
+  media = videoTrack && !audioType ? video : audio;
   recordedCurrent = false;
   resumePosition = position;
-  const source = audioOnly ? track.blob.slice(0, track.blob.size, "audio/mp4") : track.blob;
+  video.muted = Boolean(audioType);
+  // Start the audio element on the first tap so it can continue when iOS hides the video.
+  if (audioType) {
+    companionVideoUrl = URL.createObjectURL(track.blob);
+    video.src = companionVideoUrl;
+  }
+  const source = audioType ? track.blob.slice(0, track.blob.size, audioType) : track.blob;
   objectUrl = URL.createObjectURL(source);
   media.src = objectUrl;
   showArtwork(track);
 }
-videoAudioMode.addEventListener("click", () => {
-  if (!supportsVideoAudio(current)) return;
-  const position = resumePosition ?? (media.ended ? 0 : media.currentTime);
-  const playing = !media.paused && !media.ended;
-  const recorded = recordedCurrent;
-  videoAudioOnly = media === video;
-  loadTrack(current, position);
-  recordedCurrent = recorded;
-  updateSelection();
-  if (playing) play();
-});
+
+function alignCompanionVideo() {
+  if (!companionVideoUrl || document.hidden || video.readyState < 1 || video.seeking) return;
+  const time = resumePosition ?? audio.currentTime;
+  if (Math.abs(video.currentTime - time) > .25) video.currentTime = time;
+}
+
+function syncCompanionVideo() {
+  if (!companionVideoUrl) return;
+  if (document.hidden) {
+    video.pause();
+    return;
+  }
+  alignCompanionVideo();
+  if (audio.paused || audio.ended || audio.error) video.pause();
+  else if (video.paused) video.play().catch(() => {});
+}
 function move(offset) {
   if (!current) return false;
   const track = offset < 0 ? queue.back(current) : queue.forward(current);
@@ -968,6 +1000,7 @@ function togglePlayback() {
 function pause() {
   ++playRequest;
   media.pause();
+  syncCompanionVideo();
 }
 
 function tellLibrary(message) {
@@ -1039,7 +1072,7 @@ function rememberPlayback(updateQueue = false) {
       };
     }
     const position = resumePosition ?? (media.ended || !Number.isFinite(media.currentTime) ? 0 : media.currentTime);
-    localStorage.setItem(playbackKey, JSON.stringify({ ...playbackSnapshot, position, recorded: recordedCurrent, videoAudioOnly }));
+    localStorage.setItem(playbackKey, JSON.stringify({ ...playbackSnapshot, position, recorded: recordedCurrent }));
     lastCheckpoint = performance.now();
   } catch {
     // A blocked or full browser store must never interrupt playback.
@@ -1070,7 +1103,6 @@ function restorePlayback(saved) {
   } else {
     queue.start(playbackFolder?.tracks ?? rootTracks(), track);
   }
-  videoAudioOnly = state.videoAudioOnly === true;
   loadTrack(track, Number.isFinite(state.position) ? Math.max(0, state.position) : 0);
   recordedCurrent = state.recorded === true && queue.history.at(-1) === track;
 }
@@ -2346,7 +2378,7 @@ let playerDragFrame = 0;
 let clearPlayerMorph = null;
 
 function startPlayerMorph(height) {
-  if (reducedMotion.matches || miniPlayer.hidden || media === video) return null;
+  if (reducedMotion.matches || miniPlayer.hidden || isVideo(current)) return null;
   const source = player.dataset.queue === "true" ? queueCurrent.querySelector(".thumb") : get("artwork-stage").querySelector(".cover");
   const target = miniPlayer.querySelector(".thumb");
   const from = source.getBoundingClientRect();
@@ -2435,7 +2467,7 @@ player.addEventListener("pointermove", (event) => {
     clearPlayerMorph?.();
     playerDrag.active = true;
     player.setPointerCapture(event.pointerId);
-    if (media === video) clearVideoTaps();
+    if (isVideo(current)) clearVideoTaps();
     player.setAttribute("data-dragging", "");
     document.body.setAttribute("data-player-dragging", "");
   }
@@ -2782,8 +2814,8 @@ function paintMiniVideo() {
   cancelAnimationFrame(miniVideoFrame);
   miniVideoFrame = 0;
   const showingInLibrary = mobile.matches && document.body.dataset.view === "library" && !miniPlayer.inert &&
-    media === video && video.readyState >= 2 && video.videoWidth && video.videoHeight &&
-    !video.ended && !video.error;
+    isVideo(current) && video.readyState >= 2 && video.videoWidth && video.videoHeight &&
+    !media.ended && !video.error;
   if (!miniVideoContext || !showingInLibrary) {
     miniVideo.hidden = true;
     miniVideoTime = -Infinity;
@@ -2822,7 +2854,7 @@ function updateVideoLayout() {
     clipTop = Math.max(0, panel.top - target.top);
     clipBottom = Math.max(0, target.bottom - panel.bottom);
   }
-  const preview = queued && !video.ended && !video.error && video.readyState >= 2 &&
+  const preview = queued && !media.ended && !video.error && video.readyState >= 2 &&
     target.height > clipTop + clipBottom;
   videoStage.toggleAttribute("data-queue-preview", preview);
   for (const [key, value] of Object.entries({
@@ -2843,7 +2875,7 @@ window.addEventListener("resize", () => {
 });
 
 function updateVideoTools() {
-  videoFullscreen.disabled = media !== video || video.readyState < 1 || !video.videoWidth;
+  videoFullscreen.disabled = !isVideo(current) || video.readyState < 1 || !video.videoWidth;
 }
 
 function hideFullscreenControls() {
@@ -2881,7 +2913,7 @@ function closeVideoExpanded() {
 }
 
 videoFullscreen.addEventListener("click", async () => {
-  if (media !== video || !video.videoWidth) return;
+  if (!isVideo(current) || !video.videoWidth) return;
   if (document.body.hasAttribute("data-video-expanded")) {
     closeVideoExpanded();
     return;
@@ -2925,6 +2957,7 @@ for (const event of ["loadedmetadata", "loadeddata", "seeked", "emptied"]) {
     scheduleVideoLayout();
   });
 }
+video.addEventListener("loadedmetadata", alignCompanionVideo);
 
 const videoDoubleTapTime = 350;
 
@@ -2964,8 +2997,8 @@ videoStage.addEventListener("pointerup", (event) => {
     if (previous.controlsVisible) revealFullscreenControls();
     else hideFullscreenControls();
   }
-  if (media !== video || !Number.isFinite(video.duration) || !video.duration) return;
-  video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + start.seconds));
+  if (!isVideo(current) || !Number.isFinite(media.duration) || !media.duration) return;
+  media.currentTime = Math.min(media.duration, Math.max(0, media.currentTime + start.seconds));
   videoSkip.dataset.direction = start.seconds > 0 ? "next" : "previous";
   videoSkip.textContent = start.seconds > 0 ? "＋10秒" : "−10秒";
   clearTimeout(videoSkipTimer);
@@ -2988,17 +3021,25 @@ function onActiveMedia(event, handler) {
 onActiveMedia("loadedmetadata", () => {
   applyResumePosition();
   rememberTrackDuration(current, media.duration);
+  alignCompanionVideo();
 });
 for (const event of ["loadedmetadata", "durationchange", "timeupdate", "seeked"]) {
   onActiveMedia(event, updateTime);
 }
 for (const event of ["play", "playing", "pause"]) {
-  onActiveMedia(event, updatePlayback);
+  onActiveMedia(event, () => {
+    syncCompanionVideo();
+    updatePlayback();
+  });
 }
+onActiveMedia("waiting", () => { if (companionVideoUrl) video.pause(); });
+onActiveMedia("seeking", alignCompanionVideo);
+onActiveMedia("seeked", syncCompanionVideo);
 onActiveMedia("seeked", updatePlayback);
 onActiveMedia("seeked", () => rememberPlayback());
 onActiveMedia("pause", () => rememberPlayback());
 onActiveMedia("timeupdate", () => {
+  if (!video.paused) alignCompanionVideo();
   if (!media.paused && performance.now() - lastCheckpoint >= 2000) rememberPlayback();
 });
 onActiveMedia("playing", () => {
@@ -3017,18 +3058,21 @@ onActiveMedia("playing", () => {
 onActiveMedia("ended", () => {
   if (!media.ended || !current) return;
   if (!move(1)) {
+    syncCompanionVideo();
     updatePlayback();
     rememberPlayback();
   }
 });
 onActiveMedia("error", () => {
   if (!current || !media.error) return;
+  syncCompanionVideo();
   tellPlayer(playbackError());
   updatePlayback();
   updateTime();
 });
 
 document.addEventListener("visibilitychange", () => {
+  syncCompanionVideo();
   if (document.hidden) rememberPlayback();
 });
 if (!desktopPlayback && navigator.audioSession) {
