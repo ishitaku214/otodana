@@ -359,6 +359,25 @@ function youtubePreviewUrl(value) {
   return id && /^[\w-]{11}$/.test(id) ? "https://i.ytimg.com/vi/" + id + "/mqdefault.jpg" : null;
 }
 
+function youtubeWatchUrl(id) {
+  return "https://www.youtube.com/watch?v=" + id;
+}
+
+async function squareAudioArtwork(image, cover) {
+  try {
+    await image.decode();
+    const { naturalWidth: width, naturalHeight: height } = image;
+    if (width === height) return cover;
+    const side = Math.min(width, height);
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = side;
+    canvas.getContext("2d").drawImage(image, (width - side) / 2, (height - side) / 2, side, side, 0, 0, side, side);
+    return (await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", .9))) ?? cover;
+  } catch {
+    return cover;
+  }
+}
+
 async function estimateDownload(item, request) {
   const response = await request("/api/downloads/estimate", {
     method: "POST", body: downloadItemFields(item), expectedStatuses: [422, 504],
@@ -504,7 +523,7 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
   }, { root: dialog, rootMargin: "100px" }) : null;
 
   function updatePreview(row) {
-    const url = youtubePreviewUrl(row.input.value.trim());
+    const url = youtubePreviewUrl(rowMediaUrl(row, row.input.value.trim()));
     if (url === row.previewUrl) return;
     row.previewUrl = url;
     clearPreview(row);
@@ -557,6 +576,7 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
       .map((row) => ({
         ...downloadItemFields({ url: row.input.value, format: rowFormat(row), quality: row.quality.value }),
         formatChosen: row.formatChosen,
+        albumTrackId: row.albumTrackId,
         info: row.sourceInfo,
         edits: Object.fromEntries(row.fields.filter((field) => "edited" in field.dataset)
           .map((field) => [field.dataset.field, field.value])),
@@ -572,6 +592,10 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
 
   function rowFormat(row) {
     return row.formats[0].checked ? "mp4" : row.audioFormat.value;
+  }
+
+  function rowMediaUrl(row, url) {
+    return row.albumTrackId && rowFormat(row) !== "mp4" ? youtubeWatchUrl(row.albumTrackId) : url;
   }
 
   function showQualitySizes(row, sizes) {
@@ -605,6 +629,7 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
       image: query("img"),
       formats: Array.from(element.querySelectorAll('input[type="radio"]')),
       formatChosen: saved?.formatChosen ?? (format !== null),
+      albumTrackId: typeof saved?.albumTrackId === "string" && /^[\w-]{11}$/.test(saved.albumTrackId) ? saved.albumTrackId : undefined,
       quality: query(".download-quality"),
       audioFormat: query(".download-audio-format"),
       info: query(".download-row-info"),
@@ -638,6 +663,7 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
         row.formatChosen = true;
         setRowState(row);
         showQualitySizes(row);
+        if (row.albumTrackId) updatePreview(row);
         persistRows();
         updateControls();
       });
@@ -663,6 +689,7 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
       const url = downloadPageUrl(row.input.value.trim());
       if (row.detailsUrl && row.detailsUrl !== url?.href) {
         row.sourceInfo = undefined;
+        row.albumTrackId = undefined;
         for (const field of row.fields) {
           field.value = "";
           delete field.dataset.edited;
@@ -795,7 +822,7 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
       }
       setRowState(row);
       showQualitySizes(row);
-      items.push({ row, url: url.href, format: rowFormat(row), quality: row.quality.value, playlist: isYoutubePlaylist(url) });
+      items.push({ row, url: rowMediaUrl(row, url.href), format: rowFormat(row), quality: row.quality.value, playlist: isYoutubePlaylist(url) });
     }
     return { items, excluded };
   }
@@ -850,16 +877,24 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
       try {
         const response = await request("/api/downloads/playlist", { method: "POST", body: { url }, expectedStatuses: [404] });
         if (response.status === 404) throw new Error("プレイリストの取り込みには取得サーバーの更新が必要です。");
-        const { ids } = await response.json();
+        const { ids, items: details } = await response.json();
         if (!Array.isArray(ids) || !ids.length || ids.length > 200 || ids.some((id) => typeof id !== "string" || !/^[\w-]{11}$/.test(id))) {
           throw new Error("プレイリストに読み込める曲がありませんでした。");
         }
         signal.throwIfAborted();
+        const metadata = new Map(Array.isArray(details) ? details.map((item) => [item?.id, item]) : []);
         for (const id of new Set(ids)) {
-          const url = "https://www.youtube.com/watch?v=" + id;
-          const trackRow = appendRow(url, format, quality, row);
+          const entry = metadata.get(id);
+          const videoId = typeof entry?.videoId === "string" && /^[\w-]{11}$/.test(entry.videoId) ? entry.videoId : null;
+          const trackFormat = !row.formatChosen && entry?.video === true ? "mp4" : format;
+          const url = youtubeWatchUrl(videoId ?? id);
+          const trackRow = appendRow(url, trackFormat, quality, row, {
+            formatChosen: row.formatChosen,
+            albumTrackId: videoId ? id : undefined,
+            info: { title: entry?.title },
+          });
           playlistPreviewObserver?.observe(trackRow.element);
-          expanded.push({ row: trackRow, url, format, quality });
+          expanded.push({ row: trackRow, url: rowMediaUrl(trackRow, url), format: trackFormat, quality });
         }
         removeRow(row);
         numberRows();
@@ -915,13 +950,14 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
         updatePreview(row);
         const input = await downloadVideoPage(item, request, signal,
           (text, percent) => setRowState(row, "", text, true, percent));
-        const cover = await row.cover;
+        const thumbnail = await row.cover;
+        const cover = thumbnail && format !== "mp4" ? await squareAudioArtwork(row.image, thumbnail) : thumbnail;
         signal.throwIfAborted();
         setRowState(row, "", "ライブラリに保存しています…", true);
         cancel.disabled = close.disabled = true;
         const name = (input.name ?? "").replace(/\.[a-z0-9]{1,6}$/i, "")
           .replace(/[\\/:*?"<>|\p{Cc}]+/gu, " ").trim();
-        if (!row.sourceInfo) applyDownloadInfo(row, input.info);
+        applyDownloadInfo(row, input.info);
         const edits = readMediaEdits(row.element);
         await saveMedia(input.blob, (name.slice(0, 180) || "ダウンロード") + "." + format, format, cover, edits);
         saved++;
