@@ -3,8 +3,16 @@
 const get = (id) => document.getElementById(id);
 const audio = get("audio");
 const video = get("player-video");
+const desktopPlaybackVolume = 0.5;
+const playbackPlatform = navigator.userAgentData?.platform || navigator.platform;
+// iPad Safari can report a Mac platform when requesting desktop websites.
+const iPadDesktopMode = /^Mac/i.test(playbackPlatform) && navigator.maxTouchPoints > 1;
+const desktopPlayback = /^(Win|Mac|Linux|Chrome OS)/i.test(playbackPlatform) &&
+  !iPadDesktopMode && !navigator.userAgentData?.mobile && !/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+if (desktopPlayback) audio.volume = video.volume = desktopPlaybackVolume;
 const videoStage = get("video-stage");
 const videoFullscreen = get("video-fullscreen");
+const videoAudioMode = get("video-audio-mode");
 const videoSkip = get("video-skip");
 const videoSlot = get("artwork-stage").querySelector(".cover-space");
 const videoControls = document.querySelector(".player-controls");
@@ -12,20 +20,25 @@ const playerContent = document.querySelector(".player-content");
 const fullscreenRoot = document.documentElement;
 const playerCover = get("player-cover");
 let media = audio;
+let videoAudioOnly = false;
 const mediaFormats = {
   mp3: "audio/mpeg",
+  wav: "audio/wav",
   mp4: "video/mp4",
   m4v: "video/mp4",
   mov: "video/quicktime",
   webm: "video/webm",
 };
 const picker = get("file-picker");
+const importReview = get("import-review");
+const importReviewSave = get("import-review-save");
 const addTracks = get("add-tracks");
 const addDialog = get("add-dialog");
 const library = get("library");
 const librarySearch = get("search").closest(".library-search");
 const list = get("tracks");
 const search = get("search");
+const searchSuggestions = get("search-suggestions");
 const seek = get("seek");
 const toggle = get("toggle");
 const miniToggle = get("mini-toggle");
@@ -59,6 +72,14 @@ const deleteDialog = get("delete-dialog");
 const folderList = get("folders");
 const newFolder = get("new-folder");
 const createFolderDialog = get("folder-create");
+const folderDetailsDialog = get("folder-details");
+const folderDetailsForm = get("folder-details-form");
+const folderDetailsName = get("folder-details-name");
+const folderDetailsImage = get("folder-details-image");
+const folderCoverTrack = get("folder-details-cover-track");
+const folderDetailsSave = get("folder-details-save");
+const folderDetailsClose = get("folder-details-close");
+const folderDetailsMessage = get("folder-details-message");
 const selectionBar = get("folder-selection");
 const selectionTitle = get("selection-title");
 const selectionConfirm = get("selection-confirm");
@@ -67,6 +88,7 @@ const detailsSave = get("details-save");
 const detailsImage = get("details-image");
 const mobile = matchMedia("(max-width: 730px)");
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const setScreenActivity = createScreenWakeLock();
 let queueTouch;
 let queueWheel;
 let queueWheelTimer;
@@ -96,12 +118,16 @@ let menuTrack = null;
 let pendingDeletion = null;
 let deleting = false;
 let detailsDraft = null;
+let folderDetailsDraft = null;
 let detailsCoverUrl = null;
 let searchRevision = 0;
 let searching = false;
+let searchSuggestionsOpen = false;
+let searchSuggestionIndex = -1;
 let recordedCurrent = false;
 let backdrop = null;
 let importQueue = Promise.resolve();
+let pendingImport = null;
 let previewQueue = Promise.resolve();
 let saveToastTimer;
 let videoLayoutFrame = 0;
@@ -121,6 +147,72 @@ let lastCheckpoint = 0;
 const marqueeRows = new WeakMap();
 const marqueeObserver = typeof ResizeObserver === "function"
   ? new ResizeObserver((entries) => entries.forEach(({ target }) => measureMarquee(target))) : null;
+
+function createScreenWakeLock() {
+  if (!navigator.wakeLock?.request) return () => {};
+  const touch = matchMedia("(pointer: coarse)");
+  const activities = new Set();
+  let pageActive = true;
+  let sentinel;
+  let requesting = false;
+  let refreshQueued = false;
+
+  function shouldKeepScreenOn() {
+    return pageActive && !document.hidden && touch.matches && activities.size > 0;
+  }
+
+  async function refresh() {
+    if (!shouldKeepScreenOn()) {
+      const previous = sentinel;
+      sentinel = undefined;
+      if (previous && !previous.released) await previous.release().catch(() => {});
+      return;
+    }
+    if (sentinel && !sentinel.released) return;
+    if (requesting) {
+      refreshQueued = true;
+      return;
+    }
+    requesting = true;
+    try {
+      const lock = await navigator.wakeLock.request("screen");
+      if (!lock.released && shouldKeepScreenOn()) {
+        sentinel = lock;
+        lock.addEventListener("release", () => {
+          if (sentinel === lock) sentinel = undefined;
+        }, { once: true });
+      } else if (!lock.released) {
+        await lock.release();
+      }
+    } catch {
+      // Screen power settings can take priority over the app.
+    } finally {
+      requesting = false;
+      if (refreshQueued) {
+        refreshQueued = false;
+        refresh();
+      }
+    }
+  }
+
+  document.addEventListener("visibilitychange", refresh);
+  document.addEventListener("pointerdown", refresh, { passive: true });
+  touch.addEventListener("change", refresh);
+  window.addEventListener("pagehide", () => {
+    pageActive = false;
+    refresh();
+  });
+  window.addEventListener("pageshow", () => {
+    pageActive = true;
+    refresh();
+  });
+  return (activity, active) => {
+    if (active === activities.has(activity)) return;
+    if (active) activities.add(activity);
+    else activities.delete(activity);
+    refresh();
+  };
+}
 
 function libraryScrollArea() {
   return mobile.matches ? library : document.scrollingElement;
@@ -180,15 +272,19 @@ function updateTime() {
   seek.disabled = !canSeek;
   seek.max = duration || 1;
   seek.value = seconds;
-  const elapsed = formatTime(seconds);
-  const total = formatTime(duration);
+  const elapsedSeconds = Math.floor(Math.min(duration, Math.max(0, seconds)));
+  const totalSeconds = Math.floor(duration);
+  const elapsed = formatTime(elapsedSeconds);
+  const total = formatTime(totalSeconds);
   get("elapsed").textContent = elapsed;
-  get("duration").textContent = "−" + formatTime(Math.ceil(duration - seconds));
+  get("duration").textContent = "−" + formatTime(totalSeconds - elapsedSeconds);
   seek.setAttribute("aria-valuetext", total + "のうち" + elapsed);
 }
 
 function updatePlayback() {
   const playing = Boolean(current) && !media.paused && !media.ended && !media.error;
+  if (mediaSession && "playbackState" in mediaSession) mediaSession.playbackState = playing ? "playing" : (current ? "paused" : "none");
+  setScreenActivity("playback", playing);
   for (const button of [toggle, miniToggle]) {
     button.firstElementChild.dataset.playing = String(playing);
     button.setAttribute("aria-label", playing ? "一時停止" : "再生");
@@ -196,6 +292,7 @@ function updatePlayback() {
   updateVideoTools();
   activeLibraryButton?.toggleAttribute("data-playing", playing);
   queueCurrent.toggleAttribute("data-playing", playing);
+  videoStage.toggleAttribute("data-playing", media === video && playing);
   videoStage.toggleAttribute("data-ended", media === video && video.ended);
   scheduleVideoLayout();
 }
@@ -209,7 +306,11 @@ function displayTrackTitle(track) {
 }
 
 function isVideo(track) {
-  return Boolean(track?.format && track.format !== "mp3");
+  return mediaFormats[track?.format]?.startsWith("video/") ?? false;
+}
+
+function supportsVideoAudio(track) {
+  return ["mp4", "m4v"].includes(track?.format) && Boolean(audio.canPlayType("audio/mp4"));
 }
 
 function readMediaMetadata(track, includeArtwork = true) {
@@ -566,7 +667,10 @@ function updateSelection() {
   get("next").disabled = !current || !queue.hasNext;
   get("mini-next").disabled = get("next").disabled;
   toggle.disabled = !current;
-  const currentIsVideo = isVideo(current);
+  const currentIsVideo = media === video && Boolean(current);
+  videoAudioMode.hidden = !supportsVideoAudio(current);
+  videoAudioMode.textContent = currentIsVideo ? "音声のみ" : "映像に戻す";
+  videoAudioMode.setAttribute("aria-pressed", String(!currentIsVideo && supportsVideoAudio(current)));
   videoStage.hidden = !currentIsVideo;
   videoFullscreen.hidden = !currentIsVideo;
   playerCover.hidden = currentIsVideo;
@@ -720,7 +824,7 @@ function makeBackdrop(image) {
 }
 
 function updateTrackMetadata(track, metadata) {
-  if (!metadata && track.metadata) return;
+  if (track.metadata && (!metadata || isVideo(track))) return;
   const next = { title: metadata?.title, artist: metadata?.artist, album: metadata?.album };
   if (track.metadata && Object.keys(next).every((key) => next[key] === track.metadata[key])) return;
   track.metadata = next;
@@ -817,16 +921,29 @@ function selectTrack(track, followQueue = false, scope, query = "") {
 }
 
 function loadTrack(track, position = null) {
-  const nextMedia = isVideo(track) ? video : audio;
+  const audioOnly = videoAudioOnly && supportsVideoAudio(track);
+  const nextMedia = isVideo(track) && !audioOnly ? video : audio;
   clearSource(nextMedia);
   current = track;
   media = nextMedia;
   recordedCurrent = false;
   resumePosition = position;
-  objectUrl = URL.createObjectURL(track.blob);
+  const source = audioOnly ? track.blob.slice(0, track.blob.size, "audio/mp4") : track.blob;
+  objectUrl = URL.createObjectURL(source);
   media.src = objectUrl;
   showArtwork(track);
 }
+videoAudioMode.addEventListener("click", () => {
+  if (!supportsVideoAudio(current)) return;
+  const position = resumePosition ?? (media.ended ? 0 : media.currentTime);
+  const playing = !media.paused && !media.ended;
+  const recorded = recordedCurrent;
+  videoAudioOnly = media === video;
+  loadTrack(current, position);
+  recordedCurrent = recorded;
+  updateSelection();
+  if (playing) play();
+});
 function move(offset) {
   if (!current) return false;
   const track = offset < 0 ? queue.back(current) : queue.forward(current);
@@ -922,7 +1039,7 @@ function rememberPlayback(updateQueue = false) {
       };
     }
     const position = resumePosition ?? (media.ended || !Number.isFinite(media.currentTime) ? 0 : media.currentTime);
-    localStorage.setItem(playbackKey, JSON.stringify({ ...playbackSnapshot, position, recorded: recordedCurrent }));
+    localStorage.setItem(playbackKey, JSON.stringify({ ...playbackSnapshot, position, recorded: recordedCurrent, videoAudioOnly }));
     lastCheckpoint = performance.now();
   } catch {
     // A blocked or full browser store must never interrupt playback.
@@ -953,6 +1070,7 @@ function restorePlayback(saved) {
   } else {
     queue.start(playbackFolder?.tracks ?? rootTracks(), track);
   }
+  videoAudioOnly = state.videoAudioOnly === true;
   loadTrack(track, Number.isFinite(state.position) ? Math.max(0, state.position) : 0);
   recordedCurrent = state.recorded === true && queue.history.at(-1) === track;
 }
@@ -986,14 +1104,15 @@ async function restoreTracks() {
           track.plays = entry.plays;
           track.lastPlayed = entry.lastPlayed;
           track.videoThumbnail = entry.videoThumbnail;
+          track.durationSeconds = entry.durationSeconds;
         }
       }
       if (layout) {
         const order = new Map(layout.order.map((id, index) => [id, index]));
         saved.sort((first, second) => (order.get(first.id) ?? Infinity) - (order.get(second.id) ?? Infinity) || first.id - second.id);
         customTrackOrder = order.size > 0;
-        for (const { name, ids } of layout.folders) {
-          const folder = { name, tracks: [] };
+        for (const { name, ids, cover } of layout.folders) {
+          const folder = { name, cover, tracks: [] };
           for (const id of ids) {
             const track = savedById.get(id);
             if (!track || track.folder) continue;
@@ -1019,14 +1138,21 @@ async function restoreTracks() {
   }
 }
 
-function persistLibrary() {
-  if (!database) return;
+function writeLibraryLayout(folderEdit) {
   const savedIds = (entries) => entries.flatMap((track) => track.id === undefined ? [] : [track.id]);
   const layout = {
     order: customTrackOrder ? savedIds(tracks) : [],
-    folders: folders.map((folder) => ({ name: folder.name, ids: savedIds(folder.tracks) })),
+    folders: folders.map((folder) => {
+      const { name, cover } = folderEdit?.folder === folder ? folderEdit : folder;
+      return { name, ids: savedIds(folder.tracks), ...(cover && { cover }) };
+    }),
   };
-  return trackStore.run(database, "readwrite", (store) => store.put(layout, "library"), "settings")
+  return trackStore.run(database, "readwrite", (store) => store.put(layout, "library"), "settings");
+}
+
+function persistLibrary() {
+  if (!database) return;
+  return writeLibraryLayout()
     .catch(() => tellLibrary("フォルダや曲順の変更を端末に保存できませんでした。"));
 }
 
@@ -1056,21 +1182,19 @@ async function saveTrack(track) {
 
 async function persistTrack(track) {
   const { blob, title, filename, addedAt, format, sourceCover } = track;
-  track.id = await trackStore.run(database, "readwrite", (store) => store.add({ blob, title, filename, addedAt, format, ...(sourceCover && { sourceCover }) }));
-  const { edits, plays, lastPlayed, videoThumbnail, metadata } = track;
-  if (edits || plays || videoThumbnail || metadata) trackStore.updateDetails(database, track.id, (details) => {
-    if (edits || plays) Object.assign(details, { edits, plays, lastPlayed });
-    if (videoThumbnail) details.videoThumbnail = videoThumbnail;
-    if (metadata) details.metadata = metadata;
-  }).catch(() => trackFeedback(track, "曲の情報を保存できませんでした。"));
+  const entry = { blob, title, filename, addedAt, format, ...(sourceCover && { sourceCover }) };
+  const { edits, plays, lastPlayed, videoThumbnail, metadata, durationSeconds } = track;
+  track.id = edits || plays || videoThumbnail || metadata || durationSeconds
+    ? await trackStore.saveMedia(database, entry, { edits, plays, lastPlayed, videoThumbnail, metadata, durationSeconds })
+    : await trackStore.run(database, "readwrite", (store) => store.add(entry));
   if (queue.history.includes(track)) saveHistory();
 }
 
-async function saveDownloadedMedia(blob, filename, format, sourceCover) {
+async function saveDownloadedMedia(blob, filename, format, sourceCover, edits) {
   await storageReady;
   if (!database) throw new Error("このブラウザでは端末保存を利用できません。");
   const title = filename.slice(0, -(format.length + 1));
-  const track = { blob, title, filename, format, addedAt: Date.now(), sourceCover };
+  const track = { blob, title, filename, format, addedAt: Date.now(), sourceCover, edits };
   try {
     await persistTrack(track);
   } catch (error) {
@@ -1091,20 +1215,41 @@ function addSavedMediaToLibrary(track) {
   filterLibrary();
 }
 
-async function savePCTrack({ blob, title, filename, format, pcTransferId, edits }) {
+async function savePCTrack({ blob, title, filename, format, pcTransferId, addedAt, sourceCover, edits, metadata, plays, lastPlayed, videoThumbnail }) {
   await storageReady;
   if (!database) throw new Error("このブラウザでは端末保存を利用できません。");
-  const entry = { blob, title, filename, format, pcTransferId, addedAt: Date.now() };
+  const existing = blob ? null : tracks.find((track) => track.pcTransferId === pcTransferId);
+  if (existing) {
+    await existing.preview;
+    await existing.videoThumbnailRequest;
+  }
+  const entry = { ...(blob && { blob }), title, filename, format, pcTransferId, addedAt: addedAt ?? Date.now(), sourceCover };
+  const details = { edits, metadata, plays, lastPlayed, videoThumbnail };
+  let id;
   try {
-    const id = await trackStore.addTransfer(database, entry, edits);
-    addSavedMediaToLibrary({ ...entry, id, edits });
-    return true;
+    id = await trackStore.saveMedia(database, entry, details);
   } catch (error) {
     if (error?.name === "ConstraintError") return false;
     throw new Error(error?.name === "QuotaExceededError"
       ? "端末の空き容量が足りません。保存済みの項目はライブラリに残っています。"
       : "端末に保存できませんでした。音棚を開き直してお試しください。");
   }
+  if (id === undefined) throw new Error("同期中に受け取り先の曲が削除されました。もう一度送信してください。");
+  if (blob) {
+    addSavedMediaToLibrary({ ...entry, ...details, id });
+  } else if (existing && tracks.includes(existing)) {
+    if (existing.thumbnail) URL.revokeObjectURL(existing.thumbnail);
+    Object.assign(existing, entry, details, { thumbnail: null, videoThumbnailRequest: null });
+    existing.preview = loadTrackPreview(existing);
+    filterLibrary();
+    if (current === existing) {
+      updateSelection();
+      showArtwork(existing);
+    } else if (player.dataset.queue === "true") {
+      renderQueue();
+    }
+  }
+  return true;
 }
 
 async function saveImportedTracks(added, invalid) {
@@ -1195,6 +1340,7 @@ function confirmDeletion(entries) {
 function setDeleteMode(enabled) {
   deleting = enabled;
   list.toggleAttribute("data-deleting", enabled);
+  folderList.toggleAttribute("data-deleting", enabled);
   deleteMode.setAttribute("aria-pressed", String(enabled));
   deleteMode.setAttribute("aria-label", enabled ? "編集を完了" : "曲を編集");
   cancelLibraryGesture();
@@ -1253,36 +1399,45 @@ function previewDetailsCover(draft) {
   get("details-reset-cover").hidden = !draft.cover;
 }
 
-function readDetailsDuration(draft) {
-  const { track } = draft;
-  const show = (duration) => {
-    if (detailsDraft === draft && Number.isFinite(duration) && duration > 0) {
-      get("details-duration").textContent = formatTime(duration);
+function rememberTrackDuration(track, seconds) {
+  if (!track || !Number.isFinite(seconds) || seconds <= 0) return null;
+  if (track.durationSeconds !== seconds) {
+    track.durationSeconds = seconds;
+    if (database && track.id !== undefined && track.busy !== "delete") {
+      trackStore.updateDetails(database, track.id, (details) => { details.durationSeconds = seconds; }).catch(() => {});
     }
-  };
-  if (current === track && Number.isFinite(media.duration)) {
-    show(media.duration);
-    return;
   }
-  const probe = document.createElement(isVideo(track) ? "video" : "audio");
-  const url = URL.createObjectURL(track.blob);
-  const finish = () => {
-    show(probe.duration);
-    clearTimeout(timer);
-    probe.onloadedmetadata = probe.onerror = null;
-    probe.removeAttribute("src");
-    probe.load();
-    URL.revokeObjectURL(url);
-  };
-  const timer = setTimeout(finish, 5000);
-  probe.preload = "metadata";
-  probe.onloadedmetadata = probe.onerror = finish;
-  probe.src = url;
+  return seconds;
+}
+
+async function readTrackDuration(track, signal) {
+  if (signal.aborted) return null;
+  const activeDuration = current === track ? rememberTrackDuration(track, media.duration) : null;
+  if (activeDuration ?? track.durationSeconds) return activeDuration ?? track.durationSeconds;
+  return new Promise((resolve) => {
+    const probe = document.createElement(isVideo(track) ? "video" : "audio");
+    const url = URL.createObjectURL(track.blob);
+    const finish = () => {
+      const seconds = signal.aborted ? null : rememberTrackDuration(track, probe.duration);
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      probe.onloadedmetadata = probe.onerror = null;
+      probe.removeAttribute("src");
+      probe.load();
+      URL.revokeObjectURL(url);
+      resolve(seconds);
+    };
+    const timer = setTimeout(finish, 5000);
+    signal.addEventListener("abort", finish, { once: true });
+    probe.preload = "metadata";
+    probe.onloadedmetadata = probe.onerror = finish;
+    probe.src = url;
+  });
 }
 
 async function openTrackDetails(track) {
   if (!tracks.includes(track) || detailsDialog.open) return;
-  const draft = { track, cover: track.edits?.cover ?? null, coverRequest: 0 };
+  const draft = { track, cover: track.edits?.cover ?? null, coverRequest: 0, durationLookup: new AbortController() };
   detailsDraft = draft;
   get("details-form").reset();
   get("details-message").textContent = "";
@@ -1298,14 +1453,20 @@ async function openTrackDetails(track) {
   get("details-name").value = trackTitle(track);
   get("details-artist").value = trackArtist(track);
   get("details-album").value = trackAlbum(track);
+  const entries = track.folder?.tracks ?? rootTracks();
+  updateDetailsChoices(entries);
   get("details-form").inert = true;
   detailsImage.disabled = true;
   detailsDialog.showModal();
-  readDetailsDuration(draft);
+  loadDetailsChoices(draft, entries);
+  readTrackDuration(track, draft.durationLookup.signal).then((duration) => {
+    if (detailsDraft === draft && duration !== null) get("details-duration").textContent = formatTime(duration);
+  });
   const metadata = await readMediaMetadata(track).catch(() => null);
   if (detailsDraft !== draft) return;
   updateTrackMetadata(track, metadata);
-  draft.originalCover = track.sourceCover ?? metadata?.artwork;
+  draft.originalCover = track.sourceCover ?? (isVideo(track) ? await getVideoThumbnail(track) : metadata?.artwork);
+  if (detailsDraft !== draft) return;
   previewDetailsCover(draft);
   get("details-name").value = trackTitle(track);
   get("details-artist").value = trackArtist(track);
@@ -1343,6 +1504,7 @@ function recordPlay(track) {
   track.plays = (track.plays ?? 0) + 1;
   track.lastPlayed = time;
   if (detailsDraft?.track === track) updateDetailsStats(track);
+  if (track.folder && folderDetailsDraft?.folder === track.folder) updateFolderPlayStats(track.folder);
   if (track.id !== undefined && track.busy !== "delete") {
     trackStore.updateDetails(database, track.id, (details) => {
       details.plays = (details.plays ?? 0) + 1;
@@ -1443,6 +1605,92 @@ function containsQuery(value, query) {
   return value.normalize("NFKC").toLocaleLowerCase("ja").includes(query);
 }
 
+function metadataChoices(entries, readValue) {
+  const values = new Set(entries.map((track) => readValue(track).trim()).filter(Boolean));
+  return Array.from(values).sort((a, b) => a.localeCompare(b, "ja"));
+}
+
+function ensureSearchMetadata(track) {
+  if (track.metadata || !tracks.includes(track)) return;
+  track.searchMetadata ??= track.preview ?? readMediaMetadata(track, false)
+    .then((metadata) => updateTrackMetadata(track, metadata))
+    .catch(() => updateTrackMetadata(track, null));
+  return track.searchMetadata;
+}
+
+function updateDetailsChoices(entries) {
+  for (const [field, readValue] of [["artist", trackArtist], ["album", trackAlbum]]) {
+    const select = get(`details-${field}-choice`);
+    const options = metadataChoices(entries, readValue);
+    select.replaceChildren(new Option("候補から選ぶ", ""), ...options.map((value) => new Option(value, value)));
+    select.hidden = !options.length;
+  }
+}
+
+async function loadDetailsChoices(draft, entries) {
+  for (const track of entries) {
+    if (detailsDraft !== draft || !detailsDialog.open) return;
+    await ensureSearchMetadata(track);
+  }
+  if (detailsDraft === draft && detailsDialog.open) updateDetailsChoices(entries);
+}
+
+function renderSearchSuggestions() {
+  if (!searchSuggestionsOpen) return;
+  const entries = visibleLibraryTracks();
+  const query = search.value.trim().normalize("NFKC").toLocaleLowerCase("ja");
+  const groups = [["アーティスト", trackArtist]];
+  if (query) groups.push(["アルバム", trackAlbum]);
+  const options = [];
+  for (const [label, readValue] of groups) {
+    for (const value of metadataChoices(entries, readValue)) {
+      if (!containsQuery(value, query)) continue;
+      const item = document.createElement("li");
+      item.id = `search-suggestion-${options.length}`;
+      item.setAttribute("role", "option");
+      item.setAttribute("aria-selected", "false");
+      item.dataset.value = value;
+      const name = document.createElement("span");
+      name.textContent = value;
+      const kind = document.createElement("small");
+      kind.textContent = label;
+      item.append(name, kind);
+      options.push(item);
+    }
+  }
+  searchSuggestionIndex = -1;
+  search.removeAttribute("aria-activedescendant");
+  searchSuggestions.replaceChildren(...options);
+  searchSuggestions.hidden = !options.length;
+  search.setAttribute("aria-expanded", String(Boolean(options.length)));
+}
+
+function hideSearchSuggestions() {
+  searchSuggestionsOpen = false;
+  searchSuggestions.hidden = true;
+  search.removeAttribute("aria-activedescendant");
+  search.setAttribute("aria-expanded", "false");
+}
+
+function chooseSearchSuggestion(item) {
+  search.value = item.dataset.value;
+  hideSearchSuggestions();
+  search.blur();
+  filterLibrary();
+}
+
+async function openSearchSuggestions() {
+  if (searchSuggestionsOpen) return;
+  searchSuggestionsOpen = true;
+  renderSearchSuggestions();
+  const entries = visibleLibraryTracks();
+  for (const track of entries) {
+    if (!searchSuggestionsOpen || visibleLibraryTracks()[0] !== entries[0]) return;
+    await ensureSearchMetadata(track);
+  }
+  renderSearchSuggestions();
+}
+
 function rootTracks() {
   return tracks.filter((track) => !track.folder);
 }
@@ -1495,7 +1743,119 @@ function openFolderMenu(folder) {
   get("menu-title").textContent = folder.name;
   get("menu-status").textContent = folder.tracks.length + " 曲";
   get("menu-rename-folder").disabled = !database;
-  showTrackMenuActions("menu-add", "menu-rename-folder");
+  showTrackMenuActions("menu-add", "menu-folder-details", "menu-rename-folder");
+}
+
+function updateFolderPlayStats(folder) {
+  let plays = 0;
+  let lastPlayed = 0;
+  for (const track of folder.tracks) {
+    plays += track.plays ?? 0;
+    lastPlayed = Math.max(lastPlayed, track.lastPlayed ?? 0);
+  }
+  get("folder-details-plays").textContent = plays.toLocaleString("ja") + "回";
+  get("folder-details-last").textContent = displayDetailsDate(lastPlayed);
+}
+
+async function showFolderDuration(draft) {
+  const { durationLookup: { signal }, entries } = draft;
+  const label = get("folder-details-duration");
+  let total = 0;
+  let unknown = 0;
+  for (const [index, track] of entries.entries()) {
+    label.textContent = `確認中… ${index + 1} / ${entries.length}`;
+    const duration = await readTrackDuration(track, signal);
+    if (signal.aborted) return;
+    if (duration === null) unknown++;
+    else total += duration;
+  }
+  const hours = Math.floor(total / 3600);
+  const time = hours ? `${hours}:${formatTime(total % 3600).padStart(5, "0")}` : formatTime(total);
+  label.textContent = unknown ? `${time}（確認できた分、未確認 ${unknown} 件）` : time;
+  if (unknown && unknown === entries.length) label.textContent = "確認できませんでした";
+}
+
+async function previewFolderCover(draft) {
+  if (draft.previewUrl) URL.revokeObjectURL(draft.previewUrl);
+  const cover = draft.cover;
+  draft.previewUrl = cover ? URL.createObjectURL(cover) : null;
+  const image = get("folder-details-artwork");
+  get("folder-details-reset").hidden = !cover;
+  if (draft.previewUrl) {
+    image.src = draft.previewUrl;
+    image.hidden = false;
+    return;
+  }
+  image.removeAttribute("src");
+  image.hidden = true;
+  const first = draft.entries[0];
+  if (!first) return;
+  first.preview ??= loadTrackPreview(first);
+  await first.preview;
+  if (folderDetailsDraft !== draft || !folderDetailsDialog.open || draft.cover || !first.thumbnail) return;
+  image.src = first.thumbnail;
+  image.hidden = false;
+}
+
+function updateFolderEditorControls(draft) {
+  folderDetailsSave.disabled = !database || draft.loadingCover || draft.saving;
+  for (const element of [folderDetailsName, folderDetailsImage, folderCoverTrack, get("folder-details-reset"), folderDetailsClose]) {
+    element.disabled = draft.saving;
+  }
+}
+
+function openFolderDetails(folder) {
+  if (!folders.includes(folder) || folderDetailsDialog.open) return;
+  const entries = [...folder.tracks];
+  const draft = {
+    folder, entries, cover: folder.cover ?? null, coverRequest: 0, loadingCover: false, saving: false,
+    durationLookup: new AbortController(),
+  };
+  folderDetailsDraft = draft;
+  folderDetailsName.value = folder.name;
+  folderDetailsName.setCustomValidity("");
+  folderDetailsMessage.textContent = "";
+  folderCoverTrack.replaceChildren(new Option("フォルダ内の曲から選ぶ", ""),
+    ...entries.map((track, index) => new Option(trackTitle(track), String(index))));
+  folderCoverTrack.hidden = !entries.length;
+  const videos = entries.filter(isVideo).length;
+  get("folder-details-count").textContent = `音楽 ${entries.length - videos} 曲 · 動画 ${videos} 件`;
+  get("folder-details-size").textContent = displayDownloadSize(folderSize(folder));
+  updateFolderPlayStats(folder);
+  updateFolderEditorControls(draft);
+  fitFolderEditor();
+  folderViewport?.addEventListener("resize", fitFolderEditor);
+  folderViewport?.addEventListener("scroll", fitFolderEditor);
+  folderDetailsDialog.showModal();
+  previewFolderCover(draft);
+  showFolderDuration(draft);
+}
+
+async function changeFolderCover(loadCover, errorMessage) {
+  const draft = folderDetailsDraft;
+  if (!draft || draft.saving) return;
+  const request = ++draft.coverRequest;
+  const isLatest = () => folderDetailsDraft === draft && folderDetailsDialog.open && request === draft.coverRequest;
+  draft.loadingCover = true;
+  folderDetailsMessage.textContent = "";
+  updateFolderEditorControls(draft);
+  try {
+    const cover = await loadCover();
+    if (!isLatest()) return;
+    if (!cover) {
+      folderDetailsMessage.textContent = errorMessage;
+      return;
+    }
+    draft.cover = cover;
+    previewFolderCover(draft);
+  } catch {
+    if (isLatest()) folderDetailsMessage.textContent = errorMessage;
+  } finally {
+    if (isLatest()) {
+      draft.loadingCover = false;
+      updateFolderEditorControls(draft);
+    }
+  }
 }
 
 function openLibraryMenu() {
@@ -1506,6 +1866,17 @@ function openLibraryMenu() {
   get("menu-bulk-out").disabled = !available.length;
   get("menu-bulk-delete").disabled = !available.some((track) => !track.busy);
   showTrackMenuActions("menu-bulk-delete", ...(activeFolder ? ["menu-bulk-out"] : []));
+}
+
+function libraryMediaSize(bytes) {
+  const label = document.createElement("span");
+  label.className = "library-media-size";
+  label.textContent = bytes ? displayDownloadSize(bytes) : "0 MB";
+  return label;
+}
+
+function folderSize(folder) {
+  return folder.tracks.reduce((total, track) => total + track.blob.size, 0);
 }
 
 function renderFolders(query) {
@@ -1529,11 +1900,15 @@ function renderFolders(query) {
     more.textContent = "•••";
     more.setAttribute("aria-label", folder.name + "の操作");
     more.addEventListener("click", () => openFolderMenu(folder));
-    row.append(open, more);
+    row.append(open, libraryMediaSize(folderSize(folder)), more);
     folderList.append(row);
     const thumbnail = open.querySelector(".folder-icon");
     const first = folder.tracks[0];
-    if (first) {
+    if (folder.cover) {
+      folder.coverUrl ??= URL.createObjectURL(folder.cover);
+      thumbnail.firstElementChild.src = folder.coverUrl;
+      thumbnail.firstElementChild.hidden = false;
+    } else if (first) {
       thumbnail.track = first;
       if (first.thumbnail || !thumbnailObserver) showTrackThumbnail(thumbnail);
       else thumbnailObserver.observe(thumbnail);
@@ -1581,7 +1956,7 @@ function renderTracks() {
   const query = search.value.trim().normalize("NFKC").toLocaleLowerCase("ja");
   renderFolders(query);
   const libraryTracks = visibleLibraryTracks();
-  deleteMode.disabled = !libraryTracks.length;
+  deleteMode.disabled = !libraryTracks.length && !folderList.childElementCount;
   selectionConfirm.disabled = !trackSelection?.chosen.size || Boolean(trackSelection?.saving);
   if (deleteMode.disabled && deleting) setDeleteMode(false);
   const matches = matchingTracks(libraryTracks, query);
@@ -1618,7 +1993,7 @@ function renderTracks() {
     const actions = document.createElement("div");
     actions.className = "track-actions";
     actions.append(more, handle);
-    row.append(select, actions);
+    row.append(select, libraryMediaSize(track.blob.size), actions);
     updateSelectionRow(row);
     updateTrackRow(row);
     list.append(row);
@@ -1631,6 +2006,7 @@ function renderTracks() {
     ? "別の曲名やアーティスト名で探してください。"
     : activeFolder ? "ライブラリでフォルダの「•••」を開き、「フォルダへ一括追加」を選べます。" : "「♪」からiCloud Driveなどの音楽や動画を追加できます。";
   get("track-count").textContent = query ? matches.length + " / " + libraryTracks.length + " 曲" : libraryTracks.length + " 曲";
+  renderSearchSuggestions();
   updateStorageSummary();
   updateSelection();
 }
@@ -1642,11 +2018,7 @@ async function filterLibrary() {
   renderTracks();
   for (const track of unchecked) {
     if (revision !== searchRevision) return;
-    if (track.metadata || !tracks.includes(track)) continue;
-    track.searchMetadata ??= track.preview ?? readMediaMetadata(track, false)
-      .then((metadata) => updateTrackMetadata(track, metadata))
-      .catch(() => updateTrackMetadata(track, null));
-    await track.searchMetadata;
+    await ensureSearchMetadata(track);
   }
   if (revision === searchRevision && searching) {
     searching = false;
@@ -1655,7 +2027,7 @@ async function filterLibrary() {
 }
 
 addTracks.addEventListener("click", () => addDialog.showModal());
-picker.addEventListener("change", () => {
+picker.addEventListener("change", async () => {
   addDialog.close();
   const added = [];
   let invalid = 0;
@@ -1667,22 +2039,150 @@ picker.addEventListener("change", () => {
       continue;
     }
     const title = file.name.slice(0, extension.index).trim() || file.name;
-    added.push({ blob: file.slice(0, file.size, mediaFormats[format]), title, filename: file.name, addedAt: Date.now(), format, busy: "save" });
+    added.push({ blob: file.slice(0, file.size, mediaFormats[format]), title, filename: file.name, addedAt: Date.now(), format });
   }
   picker.value = "";
-  if (added.length) {
-    tracks.push(...added);
-    if (current && !playbackFolder && !playbackQuery) queue.append(added);
-    search.value = "";
-    filterLibrary();
-    tellLibrary(added.length + "曲を端末に保存しています…");
-    importQueue = importQueue.then(() => saveImportedTracks(added, invalid));
-  } else if (invalid) {
-    tellLibrary(invalid + "件は追加できませんでした。MP3、MP4、M4V、MOV、WebMのファイルを選んでください。");
+  if (!added.length) {
+    if (invalid) tellLibrary("対応する音楽・動画ファイルを選んでください。");
+    return;
   }
+  const review = { added, invalid, urls: new Map(), rows: [], reading: true, coverReads: 0 };
+  pendingImport = review;
+  const list = get("import-review-list");
+  const template = get("import-review-row");
+  list.replaceChildren();
+  for (const [index, track] of added.entries()) {
+    const row = template.content.firstElementChild.cloneNode(true);
+    row.querySelector(".import-filename").textContent = track.filename;
+    for (const field of row.querySelectorAll("input[data-field]")) {
+      field.setAttribute("aria-label", `${index + 1}件目の${field.placeholder}`);
+      field.addEventListener("input", () => { field.dataset.edited = ""; });
+    }
+    const coverInput = row.querySelector('input[type="file"]');
+    coverInput.setAttribute("aria-label", `${index + 1}件目のジャケット画像を変更`);
+    coverInput.addEventListener("change", () => changeImportCover(review, row, track, coverInput));
+    row.querySelector('[data-field="title"]').value = track.title;
+    review.rows.push(row);
+    list.append(row);
+  }
+  importReviewSave.disabled = true;
+  const feedback = get("import-review-message");
+  feedback.textContent = "ファイルの情報を読み込んでいます…";
+  feedback.dataset.loading = "";
+  importReview.showModal();
+  for (const [index, track] of added.entries()) {
+    if (pendingImport !== review || !importReview.open) return;
+    const metadata = await (["mp4", "m4v", "mov"].includes(track.format) ? readMp4Metadata(track.blob) : readMediaMetadata(track)).catch(() => null);
+    const cover = isVideo(track) ? await readVideoThumbnail(track.blob).catch(() => null) : metadata?.artwork;
+    if (pendingImport !== review || !importReview.open) return;
+    if (isVideo(track)) track.videoThumbnail = cover;
+    const row = review.rows[index];
+    for (const field of row.querySelectorAll("input[data-field]")) {
+      const value = metadata?.[field.dataset.field];
+      if (value && !("edited" in field.dataset)) field.value = value;
+    }
+    if (cover && !track.edits?.cover) showImportCover(review, row, cover);
+  }
+  feedback.removeAttribute("data-loading");
+  feedback.textContent = invalid ? invalid + "件は対応するファイル形式ではありません。" : "";
+  review.reading = false;
+  importReviewSave.disabled = review.coverReads > 0;
 });
 
-search.addEventListener("input", filterLibrary);
+function showImportCover(review, row, cover) {
+  const previous = review.urls.get(row);
+  if (previous) URL.revokeObjectURL(previous);
+  const url = URL.createObjectURL(cover);
+  review.urls.set(row, url);
+  const image = row.querySelector("img");
+  image.src = url;
+  image.hidden = false;
+}
+
+async function changeImportCover(review, row, track, input) {
+  const file = input.files[0];
+  input.value = "";
+  if (!file || pendingImport !== review || !importReview.open) return;
+  input.disabled = true;
+  review.coverReads++;
+  importReviewSave.disabled = true;
+  const feedback = get("import-review-message");
+  try {
+    const cover = await resizeCover(file);
+    if (pendingImport !== review || !importReview.open) return;
+    track.edits = { cover };
+    showImportCover(review, row, cover);
+  } catch {
+    if (pendingImport === review && importReview.open) feedback.textContent = "画像を開けませんでした。別の画像を選んでください。";
+  } finally {
+    input.disabled = false;
+    review.coverReads--;
+    if (pendingImport === review) importReviewSave.disabled = review.reading || review.coverReads > 0;
+  }
+}
+
+function readMediaEdits(container) {
+  return Object.fromEntries(Array.from(container.querySelectorAll("input[data-field]"), (input) => [input.dataset.field, input.value.trim()]));
+}
+
+get("import-review-cancel").addEventListener("click", () => importReview.close());
+importReview.addEventListener("close", () => {
+  if (importReview.open || !pendingImport) return;
+  pendingImport.urls.forEach((url) => URL.revokeObjectURL(url));
+  pendingImport = null;
+  get("import-review-list").replaceChildren();
+});
+importReviewSave.addEventListener("click", () => {
+  if (!pendingImport || importReviewSave.disabled) return;
+  const { added, invalid, rows } = pendingImport;
+  for (const [index, track] of added.entries()) {
+    track.edits = { ...track.edits, ...readMediaEdits(rows[index]) };
+    if (!track.edits.title) track.edits.title = track.title;
+    track.busy = "save";
+  }
+  importReview.close();
+  tracks.push(...added);
+  if (current && !playbackFolder && !playbackQuery) queue.append(added);
+  search.value = "";
+  filterLibrary();
+  tellLibrary(added.length + "曲を端末に保存しています…");
+  importQueue = importQueue.then(() => saveImportedTracks(added, invalid));
+});
+
+search.addEventListener("focus", openSearchSuggestions);
+search.addEventListener("click", openSearchSuggestions);
+search.addEventListener("blur", hideSearchSuggestions);
+search.addEventListener("input", () => {
+  searchSuggestionsOpen = true;
+  filterLibrary();
+});
+searchSuggestions.addEventListener("mousedown", (event) => event.preventDefault());
+searchSuggestions.addEventListener("click", (event) => {
+  const item = event.target.closest("[role=option]");
+  if (item) chooseSearchSuggestion(item);
+});
+search.addEventListener("keydown", (event) => {
+  if (event.isComposing) return;
+  if (event.key === "Escape" && !searchSuggestions.hidden) {
+    event.preventDefault();
+    hideSearchSuggestions();
+  } else if (event.key === "Enter" && searchSuggestionIndex >= 0 && !searchSuggestions.hidden) {
+    event.preventDefault();
+    chooseSearchSuggestion(searchSuggestions.children[searchSuggestionIndex]);
+  } else if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+    if (searchSuggestions.hidden) openSearchSuggestions();
+    const { children } = searchSuggestions;
+    if (!children.length || searchSuggestions.hidden) return;
+    event.preventDefault();
+    children[searchSuggestionIndex]?.setAttribute("aria-selected", "false");
+    const next = event.key === "ArrowDown" ? searchSuggestionIndex + 1 : (searchSuggestionIndex < 0 ? -1 : searchSuggestionIndex - 1);
+    searchSuggestionIndex = (next + children.length) % children.length;
+    const selected = children[searchSuggestionIndex];
+    selected.setAttribute("aria-selected", "true");
+    search.setAttribute("aria-activedescendant", selected.id);
+    selected.scrollIntoView({ block: "nearest" });
+  }
+});
 function folderAtPointer(event) {
   if (!event || !deleting) return null;
   const { clientX, clientY } = event;
@@ -1747,8 +2247,10 @@ let folderToRename = null;
 
 function fitFolderEditor() {
   if (!folderViewport) return;
-  createFolderDialog.style.setProperty("--folder-visible-top", folderViewport.offsetTop + "px");
-  createFolderDialog.style.setProperty("--folder-visible-height", folderViewport.height + "px");
+  for (const dialog of [createFolderDialog, folderDetailsDialog]) {
+    dialog.style.setProperty("--folder-visible-top", folderViewport.offsetTop + "px");
+    dialog.style.setProperty("--folder-visible-height", folderViewport.height + "px");
+  }
 }
 
 function openFolderEditor(folder = null) {
@@ -2016,6 +2518,82 @@ get("menu-rename-folder").addEventListener("click", () => {
   const folder = menuFolder;
   if (folder) closeTrackMenu(() => openFolderEditor(folder));
 });
+get("menu-folder-details").addEventListener("click", () => {
+  const folder = menuFolder;
+  if (folder) closeTrackMenu(() => openFolderDetails(folder));
+});
+folderDetailsDialog.addEventListener("cancel", (event) => {
+  if (folderDetailsDraft?.saving) event.preventDefault();
+});
+folderDetailsClose.addEventListener("click", () => folderDetailsDialog.close());
+folderDetailsDialog.addEventListener("close", () => {
+  if (folderDetailsDialog.open) return;
+  const draft = folderDetailsDraft;
+  draft?.durationLookup.abort();
+  if (draft?.previewUrl) URL.revokeObjectURL(draft.previewUrl);
+  folderDetailsDraft = null;
+  get("folder-details-artwork").removeAttribute("src");
+  folderViewport?.removeEventListener("resize", fitFolderEditor);
+  folderViewport?.removeEventListener("scroll", fitFolderEditor);
+});
+folderDetailsImage.addEventListener("change", () => {
+  const file = folderDetailsImage.files[0];
+  folderDetailsImage.value = "";
+  if (file) changeFolderCover(() => resizeCover(file), "この画像を開けませんでした。別の画像を選んでください。");
+});
+folderCoverTrack.addEventListener("change", () => {
+  if (folderCoverTrack.value === "") return;
+  const track = folderDetailsDraft?.entries[Number(folderCoverTrack.value)];
+  folderCoverTrack.value = "";
+  if (!track) return;
+  changeFolderCover(async () => {
+    const cover = track.edits?.cover ?? track.sourceCover ??
+      (isVideo(track) ? await getVideoThumbnail(track) : (await readMediaMetadata(track))?.artwork);
+    return cover ? resizeCover(cover) : null;
+  }, "この曲のジャケットを読み込めませんでした。別の曲か画像を選んでください。");
+});
+get("folder-details-reset").addEventListener("click", () => {
+  const draft = folderDetailsDraft;
+  if (!draft || draft.saving) return;
+  ++draft.coverRequest;
+  draft.cover = null;
+  draft.loadingCover = false;
+  folderDetailsMessage.textContent = "";
+  previewFolderCover(draft);
+  updateFolderEditorControls(draft);
+});
+folderDetailsName.addEventListener("input", () => folderDetailsName.setCustomValidity(""));
+folderDetailsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const draft = folderDetailsDraft;
+  if (!draft || folderDetailsSave.disabled) return;
+  const { folder, cover } = draft;
+  const name = folderDetailsName.value.trim();
+  if (!name) {
+    folderDetailsName.setCustomValidity("フォルダ名を入力してください。");
+    folderDetailsName.reportValidity();
+    return;
+  }
+  draft.saving = true;
+  folderDetailsMessage.textContent = "";
+  updateFolderEditorControls(draft);
+  try {
+    await writeLibraryLayout({ folder, name, cover });
+    if (folder.coverUrl && folder.cover !== cover) {
+      URL.revokeObjectURL(folder.coverUrl);
+      folder.coverUrl = null;
+    }
+    folder.name = name;
+    folder.cover = cover;
+    folderDetailsDialog.close();
+    filterLibrary();
+  } catch {
+    folderDetailsMessage.textContent = "フォルダの変更を保存できませんでした。空き容量を確認して、もう一度お試しください。";
+  } finally {
+    draft.saving = false;
+    if (folderDetailsDraft === draft) updateFolderEditorControls(draft);
+  }
+});
 get("menu-move-out").addEventListener("click", () => {
   const track = menuTrack;
   if (!track?.folder || track.busy) return;
@@ -2031,12 +2609,20 @@ get("menu-details").addEventListener("click", () => {
   const track = menuTrack;
   if (track) closeTrackMenu(() => openTrackDetails(track));
 });
+for (const field of ["artist", "album"]) {
+  const select = get(`details-${field}-choice`);
+  select.addEventListener("change", () => {
+    if (select.value) get(`details-${field}`).value = select.value;
+    select.value = "";
+  });
+}
 detailsDialog.addEventListener("cancel", (event) => {
   if (detailsDraft?.saving) event.preventDefault();
 });
 get("details-cancel").addEventListener("click", () => detailsDialog.close());
 detailsDialog.addEventListener("close", () => {
   if (detailsDialog.open) return;
+  detailsDraft?.durationLookup.abort();
   detailsDraft = null;
   if (detailsCoverUrl) URL.revokeObjectURL(detailsCoverUrl);
   detailsCoverUrl = null;
@@ -2195,17 +2781,17 @@ function scheduleVideoLayout() {
 function paintMiniVideo() {
   cancelAnimationFrame(miniVideoFrame);
   miniVideoFrame = 0;
-  const playingInLibrary = mobile.matches && document.body.dataset.view === "library" && !miniPlayer.inert &&
+  const showingInLibrary = mobile.matches && document.body.dataset.view === "library" && !miniPlayer.inert &&
     media === video && video.readyState >= 2 && video.videoWidth && video.videoHeight &&
-    !video.paused && !video.ended && !video.error;
-  if (!miniVideoContext || !playingInLibrary) {
+    !video.ended && !video.error;
+  if (!miniVideoContext || !showingInLibrary) {
     miniVideo.hidden = true;
     miniVideoTime = -Infinity;
     return;
   }
   // Sample the active video so the mini player never starts a second media stream.
   const time = video.currentTime;
-  if (miniVideo.hidden || Math.abs(time - miniVideoTime) >= 1 / 30) {
+  if (miniVideo.hidden || (video.paused ? time !== miniVideoTime : Math.abs(time - miniVideoTime) >= 1 / 30)) {
     const scale = Math.min(miniVideo.width / video.videoWidth, miniVideo.height / video.videoHeight);
     const width = video.videoWidth * scale;
     const height = video.videoHeight * scale;
@@ -2218,7 +2804,7 @@ function paintMiniVideo() {
       miniVideo.hidden = true;
     }
   }
-  miniVideoFrame = requestAnimationFrame(paintMiniVideo);
+  if (!video.paused) miniVideoFrame = requestAnimationFrame(paintMiniVideo);
 }
 
 function updateVideoLayout() {
@@ -2236,7 +2822,7 @@ function updateVideoLayout() {
     clipTop = Math.max(0, panel.top - target.top);
     clipBottom = Math.max(0, target.bottom - panel.bottom);
   }
-  const preview = queued && !video.paused && !video.ended && !video.error && video.readyState >= 2 &&
+  const preview = queued && !video.ended && !video.error && video.readyState >= 2 &&
     target.height > clipTop + clipBottom;
   videoStage.toggleAttribute("data-queue-preview", preview);
   for (const [key, value] of Object.entries({
@@ -2333,7 +2919,7 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("fullscreenchange", () => {
   if (document.fullscreenElement !== fullscreenRoot && document.body.hasAttribute("data-video-expanded")) setVideoExpanded(false);
 });
-for (const event of ["loadedmetadata", "loadeddata", "emptied"]) {
+for (const event of ["loadedmetadata", "loadeddata", "seeked", "emptied"]) {
   video.addEventListener(event, () => {
     updateVideoTools();
     scheduleVideoLayout();
@@ -2399,7 +2985,10 @@ function onActiveMedia(event, handler) {
   }
 }
 
-onActiveMedia("loadedmetadata", applyResumePosition);
+onActiveMedia("loadedmetadata", () => {
+  applyResumePosition();
+  rememberTrackDuration(current, media.duration);
+});
 for (const event of ["loadedmetadata", "durationchange", "timeupdate", "seeked"]) {
   onActiveMedia(event, updateTime);
 }
@@ -2442,10 +3031,17 @@ onActiveMedia("error", () => {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) rememberPlayback();
 });
+if (!desktopPlayback && navigator.audioSession) {
+  const audioSession = navigator.audioSession;
+  audioSession.type = "playback";
+  audioSession.addEventListener("statechange", () => {
+    if (current && audioSession.state === "interrupted") pause();
+  });
+}
 window.addEventListener("pagehide", () => rememberPlayback());
 syncLayout();
 const storageReady = restoreTracks();
-setupMediaDownloads(saveDownloadedMedia);
+setupMediaDownloads(saveDownloadedMedia, setScreenActivity);
 setupPCTransfer({
   async getLibrary() {
     await storageReady;
@@ -2463,13 +3059,15 @@ setupPCTransfer({
   displayTitle: trackTitle,
   displayArtist: trackArtist,
   showThumbnail: showTrackThumbnail,
-  async readTitle(track) {
-    if (track.edits?.title || track.metadata) return trackTitle(track);
-    const metadata = await readMediaMetadata(track, false).catch(() => null);
-    updateTrackMetadata(track, metadata);
+  async prepareTrack(track) {
+    if (!track.metadata) {
+      const metadata = await readMediaMetadata(track, false).catch(() => null);
+      updateTrackMetadata(track, metadata);
+    }
+    if (isVideo(track) && !track.sourceCover && !track.edits?.cover) await getVideoThumbnail(track);
     return trackTitle(track);
   },
-});
+}, setScreenActivity);
 
 if (mediaSession) {
   const actions = {

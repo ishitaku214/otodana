@@ -19,13 +19,28 @@ const trackStore = {
     });
   },
 
-  addTransfer(database, track, edits) {
+  saveMedia(database, track, details) {
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(["tracks", "trackDetails"], "readwrite");
-      const request = transaction.objectStore("tracks").add(track);
-      if (edits) request.onsuccess = () => transaction.objectStore("trackDetails").put({ id: request.result, edits });
-      transaction.oncomplete = () => resolve(request.result);
-      transaction.onabort = () => reject(transaction.error ?? request.error);
+      const tracks = transaction.objectStore("tracks");
+      const trackDetails = transaction.objectStore("trackDetails");
+      let id;
+      function storeDetails(request) {
+        request.onsuccess = () => {
+          id = request.result;
+          trackDetails.put({ ...details, id });
+        };
+      }
+      if (track.blob) {
+        storeDetails(tracks.add(track));
+      } else {
+        const lookup = tracks.index("pcTransferId").get(track.pcTransferId);
+        lookup.onsuccess = () => {
+          if (lookup.result) storeDetails(tracks.put({ ...lookup.result, ...track }));
+        };
+      }
+      transaction.oncomplete = () => resolve(id);
+      transaction.onabort = () => reject(transaction.error);
     });
   },
 

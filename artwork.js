@@ -59,6 +59,50 @@ async function readVideoThumbnail(blob) {
 
 const MAX_TAG_SIZE = 16 * 1024 * 1024;
 
+async function findMp4Box(file, start, end, wanted) {
+  for (let count = 0; start + 8 <= end && count < 4096; count++) {
+    const header = new DataView(await file.slice(start, Math.min(end, start + 16)).arrayBuffer());
+    let size = header.getUint32(0);
+    let headerSize = 8;
+    if (size === 1) {
+      if (header.byteLength < 16) return null;
+      size = Number(header.getBigUint64(8));
+      headerSize = 16;
+    } else if (size === 0) {
+      size = end - start;
+    }
+    if (!Number.isSafeInteger(size) || size < headerSize || size > end - start) return null;
+    const type = String.fromCharCode(header.getUint8(4), header.getUint8(5), header.getUint8(6), header.getUint8(7));
+    if (type === wanted) return { start: start + headerSize, end: start + size };
+    start += size;
+  }
+  return null;
+}
+
+async function readMp4Metadata(file) {
+  const metadata = {};
+  const movie = await findMp4Box(file, 0, file.size, "moov");
+  if (!movie) return metadata;
+  const user = await findMp4Box(file, movie.start, movie.end, "udta");
+  const parent = user ?? movie;
+  const meta = await findMp4Box(file, parent.start, parent.end, "meta");
+  if (!meta) return metadata;
+  const items = await findMp4Box(file, meta.start + 4, meta.end, "ilst");
+  if (!items) return metadata;
+  for (const [key, tag] of [["title", "©nam"], ["artist", "©ART"], ["album", "©alb"]]) {
+    const item = await findMp4Box(file, items.start, items.end, tag);
+    if (!item) continue;
+    const data = await findMp4Box(file, item.start, item.end, "data");
+    if (data && data.end - data.start > 8 && data.end - data.start <= 8192) {
+      const payload = await file.slice(data.start, data.end).arrayBuffer();
+      const type = new DataView(payload).getUint32(0);
+      if (type !== 1 && type !== 2) continue;
+      metadata[key] = new TextDecoder(type === 2 ? "utf-16be" : "utf-8").decode(payload.slice(8)).trim().slice(0, 300);
+    }
+  }
+  return metadata;
+}
+
 function readSize(bytes, offset, length, syncSafe = false) {
   if (offset + length > bytes.length) return -1;
   let size = 0;

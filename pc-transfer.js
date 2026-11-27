@@ -4,6 +4,11 @@ const pcTransferPath = "/api/pc-transfer";
 const pcTransferLimit = 128_000_000;
 const pcTransferChunk = 16_384;
 const pcTransferChannel = "otodana-pc-v1";
+const pcTransferDetailsVersion = 1;
+const pcTransferDetailsLimit = 256 * 1024;
+const pcTransferArtworkLimit = 2_000_000;
+const pcTransferArtworkNames = ["sourceCover", "videoThumbnail", "editedCover"];
+const pcTransferTextFields = ["title", "artist", "album"];
 const pcTransferCode = /^(?:[a-z0-9]{4}|[a-f0-9]{12})$/i;
 const pcTransferIdPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:[1-9]\d*$/;
 
@@ -92,7 +97,7 @@ function pcTrackInfo(track, deviceId, displayTitle) {
     format = Object.hasOwn(mediaFormats, extension) ? extension
       : Object.keys(mediaFormats).find((key) => mediaFormats[key] === track.blob.type) ?? "mp3";
   }
-  const fallbackTitle = format === "mp3" ? "曲" : "動画";
+  const fallbackTitle = mediaFormats[format].startsWith("video/") ? "動画" : "曲";
   const title = [displayTitle, track.title, originalName.replace(/\.[a-z0-9]+$/i, "")]
     .find((value) => typeof value === "string" && value.trim())?.trim() || fallbackTitle;
   const basename = title.replace(/[\\/:*?"<>|\p{Cc}]+/gu, " ").trim() || fallbackTitle;
@@ -104,10 +109,11 @@ function pcTrackInfo(track, deviceId, displayTitle) {
     bytes: track.blob.size,
     format,
     pcTransferId: track.pcTransferId ?? deviceId + ":" + track.id,
+    detailsVersion: pcTransferDetailsVersion,
   };
   if (track.edits) {
     entry.edits = {};
-    for (const key of ["title", "artist", "album"]) {
+    for (const key of pcTransferTextFields) {
       if (typeof track.edits[key] === "string") entry.edits[key] = track.edits[key].slice(0, 300);
     }
   }
@@ -126,13 +132,106 @@ function validatePCTrack(item) {
   }
   const { title, filename, format, pcTransferId, bytes } = item;
   const edits = {};
-  for (const key of ["title", "artist", "album"]) {
+  for (const key of pcTransferTextFields) {
     if (shortText(item.edits?.[key])) edits[key] = item.edits[key];
   }
   return { title, filename, format, pcTransferId, bytes, edits: Object.keys(edits).length ? edits : undefined };
 }
 
-async function sendPCMedia(channel, next, selected, readTitle, signal, showProgress) {
+function pcTransferTextFieldsOf(value, maxLength) {
+  if (!value || typeof value !== "object") return undefined;
+  return Object.fromEntries(pcTransferTextFields
+    .filter((key) => typeof value[key] === "string" && value[key].length <= maxLength)
+    .map((key) => [key, value[key]]));
+}
+
+function isPCArtworkType(type) {
+  return ["image/jpeg", "image/png", "image/webp", "image/gif"].includes(type);
+}
+
+function pcTrackDetails(track, item) {
+  const metadata = new Blob([JSON.stringify({
+    title: typeof track.title === "string" ? track.title : item.title,
+    filename: typeof track.filename === "string" && track.filename.trim() ? track.filename : item.filename,
+    addedAt: track.addedAt,
+    plays: track.plays,
+    lastPlayed: track.lastPlayed,
+    metadata: pcTransferTextFieldsOf(track.metadata, 8192),
+    edits: pcTransferTextFieldsOf(track.edits, 300),
+  })]);
+  if (metadata.size > pcTransferDetailsLimit) throw new Error("曲の情報が大きすぎるため転送できません。");
+  const covers = [track.sourceCover, track.videoThumbnail, track.edits?.cover];
+  const images = [];
+  const parts = [metadata];
+  for (const [index, cover] of covers.entries()) {
+    if (!cover) continue;
+    if (!(cover instanceof Blob) || !cover.size || cover.size > pcTransferArtworkLimit || !isPCArtworkType(cover.type)) {
+      throw new Error("ジャケット画像の形式または容量を確認してください。");
+    }
+    images.push({ name: pcTransferArtworkNames[index], bytes: cover.size, mime: cover.type });
+    parts.push(cover);
+  }
+  return { header: { type: "details", bytes: metadata.size, images }, parts };
+}
+
+async function receivePCBlob(next, bytes, mime, onChunk) {
+  const parts = [];
+  let received = 0;
+  while (received < bytes) {
+    const data = await next();
+    if (typeof data === "string") pcTransferMessage(data);
+    if (!(data instanceof ArrayBuffer) || !data.byteLength || data.byteLength > pcTransferChunk || received + data.byteLength > bytes) {
+      throw new Error("転送されたファイルの容量が一致しませんでした。");
+    }
+    parts.push(data);
+    received += data.byteLength;
+    onChunk(data.byteLength);
+  }
+  return new Blob(parts, { type: mime });
+}
+
+function validatePCDetailsHeader(header) {
+  if (header.type !== "details" || !Number.isSafeInteger(header.bytes) || header.bytes < 1 || header.bytes > pcTransferDetailsLimit ||
+      !Array.isArray(header.images) || header.images.length > pcTransferArtworkNames.length) {
+    throw new Error("転送された曲の情報を読み込めませんでした。");
+  }
+  const names = new Set();
+  let total = header.bytes;
+  for (const image of header.images) {
+    if (!pcTransferArtworkNames.includes(image?.name) || names.has(image.name) || !isPCArtworkType(image.mime) ||
+        !Number.isSafeInteger(image.bytes) || image.bytes < 1 || image.bytes > pcTransferArtworkLimit) {
+      throw new Error("転送されたジャケット画像の情報を読み込めませんでした。");
+    }
+    names.add(image.name);
+    total += image.bytes;
+  }
+  return total;
+}
+
+async function receivePCDetails(header, next, onChunk) {
+  const mediaInfo = JSON.parse(await (await receivePCBlob(next, header.bytes, "", onChunk)).text());
+  if (!mediaInfo || typeof mediaInfo.title !== "string" || typeof mediaInfo.filename !== "string" || !mediaInfo.filename ||
+      mediaInfo.title.length > pcTransferDetailsLimit || mediaInfo.filename.length > pcTransferDetailsLimit) {
+    throw new Error("転送された曲名またはファイル名を読み込めませんでした。");
+  }
+  const { title, filename, addedAt, plays, lastPlayed } = mediaInfo;
+  const details = {
+    title, filename,
+    addedAt: Number.isSafeInteger(addedAt) && addedAt >= 0 && addedAt <= 8.64e15 ? addedAt : undefined,
+    plays: Number.isSafeInteger(plays) && plays >= 0 ? plays : undefined,
+    lastPlayed: Number.isSafeInteger(lastPlayed) && lastPlayed >= 0 && lastPlayed <= 8.64e15 ? lastPlayed : undefined,
+    metadata: pcTransferTextFieldsOf(mediaInfo.metadata, 8192),
+    edits: pcTransferTextFieldsOf(mediaInfo.edits, 300),
+  };
+  for (const { name, bytes, mime } of header.images) {
+    const image = await receivePCBlob(next, bytes, mime, onChunk);
+    if (name === "editedCover") (details.edits ??= {}).cover = image;
+    else details[name] = image;
+  }
+  return details;
+}
+
+async function sendPCMedia(channel, next, selected, prepareTrack, signal, showProgress) {
   const deviceKey = "otodana-pc-transfer-device";
   let deviceId = localStorage.getItem(deviceKey);
   if (!deviceId) {
@@ -141,9 +240,10 @@ async function sendPCMedia(channel, next, selected, readTitle, signal, showProgr
   }
   let saved = 0;
   let skipped = 0;
+  let updated = 0;
   for (const [index, track] of selected.entries()) {
     signal.throwIfAborted();
-    const title = await readTitle(track);
+    const title = await prepareTrack(track);
     signal.throwIfAborted();
     const item = pcTrackInfo(track, deviceId, title);
     channel.send(JSON.stringify(item));
@@ -153,59 +253,73 @@ async function sendPCMedia(channel, next, selected, readTitle, signal, showProgr
       continue;
     }
     if (reply.type !== "ready") throw new Error("受け取り先の応答を確認できませんでした。");
-    const status = `${index + 1} / ${selected.length} 件目「${item.title}」を送信中…`;
+    const details = reply.detailsVersion === pcTransferDetailsVersion ? pcTrackDetails(track, item) : null;
+    const metadataOnly = Boolean(details && reply.metadataOnly === true);
+    const parts = details ? [...details.parts] : [];
+    if (!metadataOnly) parts.push(track.blob);
+    const total = parts.reduce((sum, part) => sum + part.size, 0);
+    const status = `${index + 1} / ${selected.length} 件目「${item.title}」${metadataOnly ? "の曲情報" : ""}を送信中…`;
     showProgress(status, 0);
-    for (let sent = 0; sent < item.bytes;) {
-      await waitForPeerConnection(() => channel.bufferedAmount <= 512_000 || channel.readyState !== "open", signal, 45_000, 30);
-      const bytes = await track.blob.slice(sent, sent + pcTransferChunk).arrayBuffer();
-      signal.throwIfAborted();
-      channel.send(bytes);
-      sent += bytes.byteLength;
-      showProgress(status, sent / item.bytes * 100);
+    if (details) channel.send(JSON.stringify(details.header));
+    let sent = 0;
+    for (const part of parts) {
+      for (let offset = 0; offset < part.size;) {
+        await waitForPeerConnection(() => channel.bufferedAmount <= 512_000 || channel.readyState !== "open", signal, 45_000, 30);
+        const bytes = await part.slice(offset, offset + pcTransferChunk).arrayBuffer();
+        signal.throwIfAborted();
+        channel.send(bytes);
+        offset += bytes.byteLength;
+        sent += bytes.byteLength;
+        showProgress(status, sent / total * 100);
+      }
     }
     channel.send(JSON.stringify({ type: "end" }));
     const result = pcTransferMessage(await next());
     if (result.type === "stored") saved++;
+    else if (result.type === "updated" && metadataOnly) updated++;
     else if (result.type === "skip") skipped++;
     else throw new Error("受け取り先での保存を確認できませんでした。");
   }
   channel.send(JSON.stringify({ type: "done" }));
   if (pcTransferMessage(await next()).type !== "complete") throw new Error("転送の完了を確認できませんでした。");
-  return { saved, skipped };
+  return { saved, updated, skipped };
 }
 
 async function receivePCMedia(channel, next, library, signal, showProgress) {
   let saved = 0;
   let skipped = 0;
+  let updated = 0;
   for (let message = pcTransferMessage(await next()); message.type !== "done"; message = pcTransferMessage(await next())) {
     const { bytes, ...entry } = validatePCTrack(message);
-    if (await library.hasTrack(entry.pcTransferId)) {
+    const versioned = message.detailsVersion === pcTransferDetailsVersion;
+    const existing = await library.hasTrack(entry.pcTransferId);
+    if (existing && !versioned) {
       channel.send(JSON.stringify({ type: "skip" }));
       skipped++;
       continue;
     }
-    const status = `「${entry.edits?.title || entry.title || entry.filename}」を受信中…`;
+    const status = `「${entry.edits?.title || entry.title || entry.filename}」${existing ? "の曲情報" : ""}を受信中…`;
     showProgress(status, 0);
-    channel.send(JSON.stringify({ type: "ready" }));
-    const parts = [];
+    channel.send(JSON.stringify({ type: "ready", ...(versioned && { detailsVersion: pcTransferDetailsVersion, metadataOnly: existing }) }));
+    let total = existing ? 0 : bytes;
     let received = 0;
-    while (received < bytes) {
-      const data = await next();
-      if (typeof data === "string") pcTransferMessage(data);
-      if (!(data instanceof ArrayBuffer) || !data.byteLength || data.byteLength > pcTransferChunk || received + data.byteLength > bytes) {
-        throw new Error("転送されたファイルの容量が一致しませんでした。");
-      }
-      parts.push(data);
-      received += data.byteLength;
-      showProgress(status, received / bytes * 100);
+    const onChunk = (size) => {
+      received += size;
+      showProgress(status, received / total * 100);
+    };
+    if (versioned) {
+      const header = pcTransferMessage(await next());
+      total += validatePCDetailsHeader(header);
+      Object.assign(entry, await receivePCDetails(header, next, onChunk));
     }
+    const blob = existing ? undefined : await receivePCBlob(next, bytes, mediaFormats[entry.format], onChunk);
     if (pcTransferMessage(await next()).type !== "end") throw new Error("ファイルの最後まで受け取れませんでした。");
     showProgress("端末に保存中…", 100);
     signal.throwIfAborted();
-    const blob = new Blob(parts, { type: mediaFormats[entry.format] });
     if (await library.saveTrack({ ...entry, blob })) {
-      channel.send(JSON.stringify({ type: "stored" }));
-      saved++;
+      channel.send(JSON.stringify({ type: existing ? "updated" : "stored" }));
+      if (existing) updated++;
+      else saved++;
     } else {
       channel.send(JSON.stringify({ type: "skip" }));
       skipped++;
@@ -214,10 +328,10 @@ async function receivePCMedia(channel, next, library, signal, showProgress) {
   channel.send(JSON.stringify({ type: "complete" }));
   // The sender closes after it receives the final acknowledgement.
   await waitForPeerConnection(() => channel.readyState === "closed", signal, 3000).catch(() => {});
-  return { saved, skipped };
+  return { saved, updated, skipped };
 }
 
-function setupPCTransfer(library) {
+function setupPCTransfer(library, setScreenActivity) {
   const find = (id) => document.getElementById("pc-transfer-" + id);
   const dialog = find("dialog");
   const send = find("send");
@@ -233,6 +347,7 @@ function setupPCTransfer(library) {
   const codeDisplay = find("code");
   const progress = find("progress");
   const status = find("status");
+  const selection = find("selection");
   const cancel = find("cancel");
   const chosen = new Set();
   const visibleChoices = new Map();
@@ -361,7 +476,7 @@ function setupPCTransfer(library) {
     const folderButtons = folder ? [] : contents.folders.map(folderChoice);
     list.replaceChildren(...folderButtons, ...entries.map(trackChoice));
     list.scrollTop = 0;
-    find("selection").textContent = folder && !entries.length ? "このフォルダに曲がありません。"
+    selection.textContent = folder && !entries.length ? "このフォルダに曲がありません。"
       : !folderButtons.length && !entries.length ? "この端末のライブラリに曲がありません。"
       : "送るファイルを選んでください。1件128 MBまで。";
     updateControls();
@@ -373,14 +488,17 @@ function setupPCTransfer(library) {
     folder = null;
     contents = { root: [], folders: [] };
     renderChoices();
-    find("selection").textContent = "ライブラリを読み込んでいます…";
+    selection.textContent = "ライブラリを読み込んでいます…";
+    selection.setAttribute("data-loading", "");
     try {
       const loaded = await library.getLibrary();
       if (revision !== choicesRevision || sender.hidden || !dialog.open) return;
       contents = loaded;
       renderChoices();
     } catch {
-      if (revision === choicesRevision) find("selection").textContent = "ライブラリを読み込めませんでした。";
+      if (revision === choicesRevision) selection.textContent = "ライブラリを読み込めませんでした。";
+    } finally {
+      if (revision === choicesRevision) selection.removeAttribute("data-loading");
     }
   }
 
@@ -403,6 +521,7 @@ function setupPCTransfer(library) {
     if (sending) loadChoices();
     else {
       choicesRevision++;
+      selection.removeAttribute("data-loading");
       artworkObserver?.disconnect();
     }
   }
@@ -425,6 +544,8 @@ function setupPCTransfer(library) {
     const selected = sending ? selectedTracks() : [];
     const enteredCode = normalizedCode();
     updateControls();
+    status.setAttribute("data-loading", "");
+    setScreenActivity("transfer", true);
     function useChannel(opened) {
       channel = opened;
       channel.binaryType = "arraybuffer";
@@ -478,10 +599,13 @@ function setupPCTransfer(library) {
         find("pair").hidden = true;
       }
       const result = sending
-        ? await sendPCMedia(channel, next, selected, library.readTitle, signal, showProgress)
+        ? await sendPCMedia(channel, next, selected, library.prepareTrack, signal, showProgress)
         : await receivePCMedia(channel, next, library, signal, showProgress);
-      const skipped = result.skipped ? ` すでに保存済みの ${result.skipped} 件を省きました。` : "";
-      showProgress(`${result.saved} 件を${sending ? "送信" : "端末に保存"}しました。` + skipped);
+      const summary = [];
+      if (result.saved) summary.push(`${result.saved} 件を${sending ? "送信" : "端末に保存"}しました。`);
+      if (result.updated) summary.push(`受け取り先の曲情報を ${result.updated} 件更新しました。`);
+      if (result.skipped) summary.push(`すでに保存済みの ${result.skipped} 件を省きました。`);
+      showProgress(summary.join(" "));
     } catch (error) {
       const message = String(signal.aborted ? signal.reason?.message : error?.message || "転送に失敗しました。");
       if (!signal.aborted && channel?.readyState === "open") {
@@ -494,6 +618,8 @@ function setupPCTransfer(library) {
       peer?.close();
       if (room) request(room, { method: "DELETE", requestSignal: AbortSignal.timeout(5000) }).catch(() => {});
       controller = null;
+      status.removeAttribute("data-loading");
+      setScreenActivity("transfer", false);
       find("pair").hidden = true;
       updateControls();
     }
@@ -525,6 +651,7 @@ function setupPCTransfer(library) {
   cancel.addEventListener("click", () => controller?.abort(new Error("転送を中止しました。保存済みの項目はライブラリに残っています。")));
   dialog.addEventListener("close", () => {
     choicesRevision++;
+    selection.removeAttribute("data-loading");
     artworkObserver?.disconnect();
     cancel.click();
   });
