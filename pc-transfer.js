@@ -4,6 +4,9 @@ const pcTransferPath = "/api/pc-transfer";
 const pcTransferChunk = 16_384;
 const pcTransferIdleTimeout = 120_000;
 const pcTransferInterrupted = "同期が中断されました。両方で音棚を開き、新しい転送コードで再開してください。保存済みのファイルは再送されません。";
+const pcResumeKey = /^[a-f0-9]{32}$/;
+const pcResumePing = "otodana-resume-ping";
+const pcResumePong = "otodana-resume-pong";
 const pcTransferChannel = "otodana-pc-v1";
 const pcTransferFolderChannel = "otodana-pc-v2";
 const pcLegacyTransferLimit = 128_000_000;
@@ -16,6 +19,14 @@ const pcTransferTextFields = ["title", "artist", "album"];
 const pcTransferCode = /^(?:[a-z0-9]{4}|[a-f0-9]{12})$/i;
 const pcTransferIdPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:[1-9]\d*$/;
 const pcTransferFolderIdPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+
+class PCTransferInterruption extends Error {
+  constructor() { super(pcTransferInterrupted); }
+}
+
+function pcResumeId() {
+  return crypto.randomUUID().replaceAll("-", "");
+}
 
 function waitForPCTransfer(delay, signal) {
   signal.throwIfAborted();
@@ -32,11 +43,11 @@ function waitForPCTransfer(delay, signal) {
   });
 }
 
-async function waitForPeerConnection(test, signal, timeout, interval = 100, message = "端末同士を接続できませんでした。同じWi-Fiで両方の音棚を開いたままお試しください。") {
+async function waitForPeerConnection(test, signal, timeout, interval = 100, failure) {
   const deadline = performance.now() + timeout;
   while (!test()) {
     if (performance.now() >= deadline) {
-      throw new Error(message);
+      throw failure ?? new Error("端末同士を接続できませんでした。同じWi-Fiで両方の音棚を開いたままお試しください。");
     }
     await waitForPCTransfer(interval, signal);
   }
@@ -49,7 +60,7 @@ async function pcLocalDescription(peer, description, signal) {
   return peer.localDescription.sdp;
 }
 
-function pcTransferInbox(channel, signal) {
+function pcTransferInbox(channel, signal, canResume) {
   const messages = [];
   let pending;
   let failure;
@@ -59,16 +70,21 @@ function pcTransferInbox(channel, signal) {
   }
   channel.addEventListener("message", ({ data }) => {
     if (failure) return;
+    if (canResume() && data === pcResumePing) {
+      if (channel.readyState === "open") channel.send(pcResumePong);
+      return;
+    }
+    if (canResume() && data === pcResumePong) return;
     if (pending) {
       pending.resolve(data);
     } else if (messages.length < 256) {
       messages.push(data);
     } else {
-      stop(new Error("受け取りが追いつきませんでした。もう一度お試しください。"));
+      stop(canResume() ? new PCTransferInterruption() : new Error("受け取りが追いつきませんでした。もう一度お試しください。"));
       channel.close();
     }
   });
-  channel.addEventListener("close", () => stop(new Error(pcTransferInterrupted)));
+  channel.addEventListener("close", () => stop(new PCTransferInterruption()));
   signal.addEventListener("abort", () => stop(signal.reason), { once: true });
   return async () => {
     signal.throwIfAborted();
@@ -76,12 +92,48 @@ function pcTransferInbox(channel, signal) {
     if (failure) throw failure;
     const data = await new Promise((resolve, reject) => {
       pending = { resolve, reject };
-      const timer = setTimeout(() => pending.reject(new Error(pcTransferInterrupted)), pcTransferIdleTimeout);
+      const timer = setTimeout(() => pending.reject(new PCTransferInterruption()), canResume() ? 30_000 : pcTransferIdleTimeout);
       pending.resolve = (value) => { clearTimeout(timer); pending = null; resolve(value); };
       pending.reject = (error) => { clearTimeout(timer); pending = null; reject(error); };
     });
     return data;
   };
+}
+
+function watchPCTransferConnection(peer, channel, link) {
+  let hidden = document.hidden;
+  let probeTimer;
+  let disconnectTimer;
+  function interrupted() { link.abort(new PCTransferInterruption()); }
+  function onVisibility() {
+    if (document.hidden) {
+      hidden = true;
+      clearTimeout(probeTimer);
+      return;
+    }
+    if (!hidden || link.signal.aborted) return;
+    hidden = false;
+    if (channel.readyState !== "open") return interrupted();
+    probeTimer = setTimeout(interrupted, 6000);
+    try { channel.send(pcResumePing); }
+    catch { interrupted(); }
+  }
+  function clearProbe({ data }) {
+    if (data === pcResumePong) clearTimeout(probeTimer);
+  }
+  function onConnectionState() {
+    clearTimeout(disconnectTimer);
+    if (["failed", "closed"].includes(peer.connectionState)) interrupted();
+    else if (peer.connectionState === "disconnected") disconnectTimer = setTimeout(interrupted, 10_000);
+  }
+  document.addEventListener("visibilitychange", onVisibility, { signal: link.signal });
+  channel.addEventListener("message", clearProbe, { signal: link.signal });
+  peer.addEventListener("connectionstatechange", onConnectionState, { signal: link.signal });
+  link.signal.addEventListener("abort", () => {
+    clearTimeout(probeTimer);
+    clearTimeout(disconnectTimer);
+  }, { once: true });
+  onConnectionState();
 }
 
 function pcTransferMessage(data) {
@@ -246,10 +298,11 @@ async function receivePCDetails(header, next, onChunk) {
   return details;
 }
 
-async function sendPCBlob(channel, blob, signal, onChunk = () => {}) {
+async function sendPCBlob(channel, blob, signal, timeout, onChunk = () => {}) {
+  const interrupted = new PCTransferInterruption();
   for (let offset = 0; offset < blob.size;) {
-    await waitForPeerConnection(() => channel.bufferedAmount <= 512_000 || channel.readyState !== "open", signal, pcTransferIdleTimeout, 30, pcTransferInterrupted);
-    if (channel.readyState !== "open") throw new Error(pcTransferInterrupted);
+    await waitForPeerConnection(() => channel.bufferedAmount <= 512_000 || channel.readyState !== "open", signal, timeout, 30, interrupted);
+    if (channel.readyState !== "open") throw new PCTransferInterruption();
     const bytes = await blob.slice(offset, offset + pcTransferChunk).arrayBuffer();
     signal.throwIfAborted();
     channel.send(bytes);
@@ -258,13 +311,13 @@ async function sendPCBlob(channel, blob, signal, onChunk = () => {}) {
   }
 }
 
-async function sendPCFolder(channel, next, folder, signal) {
+async function sendPCFolder(channel, next, folder, signal, timeout) {
   const { name, cover, pcTransferId: id } = folder;
   if (cover && (!cover.size || cover.size > pcTransferArtworkLimit || !isPCArtworkType(cover.type))) {
     throw new Error("フォルダのジャケット画像の形式または容量を確認してください。");
   }
   channel.send(JSON.stringify({ type: "folder", id, name, cover: cover ? { bytes: cover.size, mime: cover.type } : null }));
-  if (cover) await sendPCBlob(channel, cover, signal);
+  if (cover) await sendPCBlob(channel, cover, signal, timeout);
   if (pcTransferMessage(await next()).type !== "folder-stored") throw new Error("受け取り先でのフォルダ作成を確認できませんでした。");
 }
 
@@ -279,7 +332,7 @@ async function receivePCFolder(message, next, library, signal) {
   return library.saveFolder({ name, cover: artwork, pcTransferId: id });
 }
 
-async function sendPCMedia(channel, next, selected, library, signal, showProgress) {
+async function sendPCMedia(channel, next, selected, library, signal, showProgress, canResume) {
   const deviceKey = "otodana-pc-transfer-device";
   let deviceId = localStorage.getItem(deviceKey);
   if (!deviceId) {
@@ -289,9 +342,10 @@ async function sendPCMedia(channel, next, selected, library, signal, showProgres
   let saved = 0;
   let skipped = 0;
   let updated = 0;
+  const timeout = canResume ? 30_000 : pcTransferIdleTimeout;
   for (const folder of selected.folders) {
     signal.throwIfAborted();
-    await sendPCFolder(channel, next, folder, signal);
+    await sendPCFolder(channel, next, folder, signal, timeout);
   }
   for (const [index, { track, folder }] of selected.items.entries()) {
     signal.throwIfAborted();
@@ -316,7 +370,7 @@ async function sendPCMedia(channel, next, selected, library, signal, showProgres
     if (details) channel.send(JSON.stringify(details.header));
     let sent = 0;
     for (const part of parts) {
-      await sendPCBlob(channel, part, signal, (bytes) => {
+      await sendPCBlob(channel, part, signal, timeout, (bytes) => {
         sent += bytes;
         showProgress(status, sent / total * 100);
       });
@@ -336,7 +390,7 @@ async function sendPCMedia(channel, next, selected, library, signal, showProgres
   return { saved, updated, skipped, folders: selected.folders.length };
 }
 
-async function receivePCMedia(channel, next, library, signal, showProgress) {
+async function receivePCMedia(channel, next, library, signal, showProgress, completed) {
   let saved = 0;
   let skipped = 0;
   let updated = 0;
@@ -355,7 +409,8 @@ async function receivePCMedia(channel, next, library, signal, showProgress) {
     if (message.folderId !== undefined && !destination) throw new Error("転送された曲の保存先フォルダを確認できませんでした。");
     const versioned = message.detailsVersion === pcTransferDetailsVersion;
     const existing = await library.hasTrack(entry.pcTransferId);
-    if (existing && !versioned) {
+    if (existing && (!versioned || completed.has(entry.pcTransferId))) {
+      destination?.order.push(entry.pcTransferId);
       channel.send(JSON.stringify({ type: "skip" }));
       skipped++;
       continue;
@@ -379,7 +434,9 @@ async function receivePCMedia(channel, next, library, signal, showProgress) {
     showProgress("端末に保存中…", 100);
     signal.throwIfAborted();
     const save = async () => library.saveTrack({ ...entry, blob }, destination?.folder);
-    if (await (supportsFolders ? keepPCSenderWaiting(channel, save) : save())) {
+    if (await keepPCSenderWaiting(channel, save)) {
+      completed.add(entry.pcTransferId);
+      signal.throwIfAborted();
       destination?.order.push(entry.pcTransferId);
       channel.send(JSON.stringify({ type: existing ? "updated" : "stored" }));
       if (existing) updated++;
@@ -676,13 +733,12 @@ function setupPCTransfer(library, setScreenActivity) {
     }
     const session = new AbortController();
     controller = session;
-    const { signal } = session;
-    let peer;
-    let channel;
-    let next;
+    const connection = readDownloadConnection();
+    const resumeKey = sending ? pcResumeId() : null;
+    const completed = new Set();
+    let recoveryPath;
+    let lastOffer;
     let request;
-    let room;
-    let pairingTimer;
     const selected = sending ? selectedMedia() : null;
     const extended = sending && (selected.folders.length > 0 || selected.items.some(({ track }) => track.blob.size > pcLegacyTransferLimit));
     const enteredCode = normalizedCode();
@@ -699,63 +755,131 @@ function setupPCTransfer(library, setScreenActivity) {
         : "画面の自動ロックを防げません。同期が終わるまで画面を点灯させてください。";
       if (screenNote.textContent !== message) screenNote.textContent = message;
     });
-    function useChannel(opened) {
-      channel = opened;
-      channel.binaryType = "arraybuffer";
-      next = pcTransferInbox(channel, signal);
+    function closeRoom(path) {
+      request(path, { method: "DELETE", requestSignal: AbortSignal.timeout(5000) }).catch(() => {});
     }
-    try {
-      showProgress("接続先を確認中…");
-      request = await createDownloadRequest(readDownloadConnection(), signal, showProgress);
-      peer = new RTCPeerConnection({ iceServers: [] });
-      pairingTimer = setTimeout(() => session.abort(new Error("接続の待ち時間が過ぎました。新しいコードでお試しください。")), 180_000);
-      if (sending) {
-        if (selected.folders.length) await library.prepareFolders(selected.folders);
-        useChannel(peer.createDataChannel(extended ? pcTransferFolderChannel : pcTransferChannel));
-        const offer = await pcLocalDescription(peer, await peer.createOffer(), signal);
-        const created = await request(pcTransferPath, { method: "POST", body: { offer, shortCode: true } });
-        const { code } = await created.json();
-        if (typeof code !== "string" || !pcTransferCode.test(code)) throw new Error("転送コードを発行できませんでした。");
-        room = pcTransferPath + "/" + code;
-        codeDisplay.value = code.toLowerCase().match(/.{4}/g).join("-");
-        find("pair").hidden = false;
-        dialog.scrollTop = 0;
-        showProgress("受け取る端末でコードを入力してください。");
-        while (true) {
-          const pending = await request(room);
-          const { answer } = await pending.json();
-          if (answer) {
-            await peer.setRemoteDescription({ type: "answer", sdp: answer });
-            break;
-          }
-          await waitForPCTransfer(1200, signal);
+
+    async function transfer(retry) {
+      const link = new AbortController();
+      const signal = AbortSignal.any([session.signal, link.signal]);
+      const pairing = AbortSignal.any([signal, AbortSignal.timeout(retry ? 150_000 : 180_000)]);
+      let peer;
+      let channel;
+      let next;
+      let room;
+      let paired = false;
+      function useChannel(opened) {
+        channel = opened;
+        channel.binaryType = "arraybuffer";
+        next = pcTransferInbox(channel, signal, () => Boolean(recoveryPath));
+      }
+      async function poll(path, predicate) {
+        for (;;) {
+          const response = await request(path, { requestSignal: pairing, expectedStatuses: retry ? [404] : [] });
+          if (response.ok) {
+            const info = await response.json();
+            if (predicate(info)) return info;
+            if (retry && sending && info.id !== lastOffer) throw new PCTransferInterruption();
+          } else if (retry && sending) throw new PCTransferInterruption();
+          await waitForPCTransfer(1200, pairing);
         }
-      } else {
-        const path = pcTransferPath + "/" + enteredCode;
-        const invitation = await request(path);
-        const { offer } = await invitation.json();
-        if (typeof offer !== "string") throw new Error("転送コードを確認できませんでした。");
-        peer.addEventListener("datachannel", ({ channel: opened }) => {
-          if ([pcTransferChannel, pcTransferFolderChannel].includes(opened.label) && !channel) useChannel(opened);
-          else opened.close();
-        });
-        await peer.setRemoteDescription({ type: "offer", sdp: offer });
-        const answer = await pcLocalDescription(peer, await peer.createAnswer(), signal);
-        await request(path, { method: "POST", body: { answer } });
       }
-      showProgress("端末同士を接続中…");
-      await waitForPeerConnection(() => channel?.readyState === "open" || (extended && channel?.readyState === "closed"), signal, 25_000);
-      if (extended && channel.readyState === "closed") throw new Error("フォルダや大きいファイルの同期には、両方の端末で新しい音棚を開いてください。");
-      clearTimeout(pairingTimer);
-      if (room) {
-        // A connected pair no longer needs the server.
-        request(room, { method: "DELETE", requestSignal: AbortSignal.timeout(5000) }).catch(() => {});
-        room = undefined;
-        find("pair").hidden = true;
+      try {
+        showProgress(retry ? "同期を再接続中…" : "接続先を確認中…");
+        request = await createDownloadRequest(connection, pairing, showProgress);
+        peer = new RTCPeerConnection({ iceServers: [] });
+        if (sending) {
+          useChannel(peer.createDataChannel(extended ? pcTransferFolderChannel : pcTransferChannel));
+          const offer = await pcLocalDescription(peer, await peer.createOffer(), pairing);
+          if (retry) {
+            lastOffer = pcResumeId();
+            await request(recoveryPath, { method: "POST", body: { offer, id: lastOffer } });
+          } else {
+            const created = await request(pcTransferPath, { method: "POST", body: { offer, shortCode: true, resume: resumeKey } });
+            const { code } = await created.json();
+            if (typeof code !== "string" || !pcTransferCode.test(code)) throw new Error("転送コードを発行できませんでした。");
+            room = pcTransferPath + "/" + code;
+            codeDisplay.value = code.toLowerCase().match(/.{4}/g).join("-");
+            find("pair").hidden = false;
+            dialog.scrollTop = 0;
+            showProgress("受け取る端末でコードを入力してください。");
+          }
+          const { answer, canResume } = await poll(retry ? recoveryPath : room, (info) => typeof info.answer === "string" && (!retry || info.id === lastOffer));
+          if (!retry && canResume === true) recoveryPath = `${pcTransferPath}/resume/${resumeKey}`;
+          await peer.setRemoteDescription({ type: "answer", sdp: answer });
+        } else {
+          const path = retry ? recoveryPath : pcTransferPath + "/" + enteredCode;
+          const invitation = retry
+            ? await poll(path, (info) => pcResumeKey.test(info.id) && info.id !== lastOffer && !info.answer)
+            : await (await request(path)).json();
+          const { offer, resume, id } = invitation;
+          if (typeof offer !== "string") throw new Error("転送コードを確認できませんでした。");
+          if (retry) lastOffer = id;
+          else if (typeof resume === "string" && pcResumeKey.test(resume)) recoveryPath = `${pcTransferPath}/resume/${resume}`;
+          peer.addEventListener("datachannel", ({ channel: opened }) => {
+            if ([pcTransferChannel, pcTransferFolderChannel].includes(opened.label) && !channel) useChannel(opened);
+            else opened.close();
+          });
+          await peer.setRemoteDescription({ type: "offer", sdp: offer });
+          const answer = await pcLocalDescription(peer, await peer.createAnswer(), pairing);
+          const answered = await request(path, {
+            method: "POST", body: retry ? { answer, id } : { answer, resume: Boolean(recoveryPath) },
+            expectedStatuses: retry ? [409] : [],
+          });
+          if (!answered.ok) throw new PCTransferInterruption();
+        }
+        showProgress(retry ? "端末同士を再接続中…" : "端末同士を接続中…");
+        try {
+          await waitForPeerConnection(() => channel?.readyState === "open" || channel?.readyState === "closed", pairing, 25_000);
+        } catch (error) {
+          if (recoveryPath && !session.signal.aborted) throw new PCTransferInterruption();
+          throw error;
+        }
+        if (channel.readyState === "closed") {
+          if (recoveryPath) throw new PCTransferInterruption();
+          throw new Error(extended ? "フォルダや大きいファイルの同期には、両方の端末で新しい音棚を開いてください。" : pcTransferInterrupted);
+        }
+        paired = true;
+        if (room) {
+          closeRoom(room);
+          room = undefined;
+          find("pair").hidden = true;
+        }
+        if (recoveryPath) watchPCTransferConnection(peer, channel, link);
+        return await (sending
+          ? sendPCMedia(channel, next, selected, library, signal, showProgress, Boolean(recoveryPath))
+          : receivePCMedia(channel, next, library, signal, showProgress, completed));
+      } catch (error) {
+        if (!session.signal.aborted && (error instanceof PCTransferInterruption || link.signal.aborted || (channel && error instanceof DOMException && channel.readyState !== "open"))) {
+          throw new PCTransferInterruption();
+        }
+        if (!paired && pairing.aborted && !session.signal.aborted) throw new Error(retry ? pcTransferInterrupted : "接続の待ち時間が過ぎました。新しいコードでお試しください。");
+        if (channel?.readyState === "open") {
+          try { channel.send(JSON.stringify({ type: "error", message: String(error.message || "転送に失敗しました。").slice(0, 300) })); }
+          catch { /* The peer may have disconnected already. */ }
+        }
+        throw error;
+      } finally {
+        link.abort();
+        channel?.close();
+        peer?.close();
+        if (room) closeRoom(room);
       }
-      const result = sending
-        ? await sendPCMedia(channel, next, selected, library, signal, showProgress)
-        : await receivePCMedia(channel, next, library, signal, showProgress);
+    }
+
+    try {
+      if (sending && selected.folders.length) await library.prepareFolders(selected.folders);
+      let result;
+      for (let retry = 0; ; retry++) {
+        session.signal.throwIfAborted();
+        try {
+          result = await transfer(retry > 0);
+          break;
+        } catch (error) {
+          session.signal.throwIfAborted();
+          if (!recoveryPath || retry >= 3 || !(error instanceof PCTransferInterruption)) throw error;
+        }
+      }
       const summary = [];
       if (result.folders) summary.push(`${result.folders}フォルダを${sending ? "送信" : "同期"}しました。`);
       if (result.saved) summary.push(`${result.saved} 件を${sending ? "送信" : "端末に保存"}しました。`);
@@ -763,16 +887,10 @@ function setupPCTransfer(library, setScreenActivity) {
       if (result.skipped) summary.push(`すでに保存済みの ${result.skipped} 件を省きました。`);
       showProgress(summary.join(" "));
     } catch (error) {
-      const message = String(signal.aborted ? signal.reason?.message : error?.message || "転送に失敗しました。");
-      if (!signal.aborted && channel?.readyState === "open") {
-        channel.send(JSON.stringify({ type: "error", message: message.slice(0, 300) }));
-      }
+      const message = String(session.signal.aborted ? session.signal.reason?.message : error?.message || "転送に失敗しました。");
       if (dialog.open) showProgress(message);
     } finally {
-      clearTimeout(pairingTimer);
-      channel?.close();
-      peer?.close();
-      if (room) request(room, { method: "DELETE", requestSignal: AbortSignal.timeout(5000) }).catch(() => {});
+      if (sending && recoveryPath) closeRoom(recoveryPath);
       controller = null;
       status.removeAttribute("data-loading");
       setScreenActivity("transfer", false);
