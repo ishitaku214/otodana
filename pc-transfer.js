@@ -2,6 +2,8 @@
 
 const pcTransferPath = "/api/pc-transfer";
 const pcTransferChunk = 16_384;
+const pcTransferIdleTimeout = 120_000;
+const pcTransferInterrupted = "同期が中断されました。両方で音棚を開き、新しい転送コードで再開してください。保存済みのファイルは再送されません。";
 const pcTransferChannel = "otodana-pc-v1";
 const pcTransferFolderChannel = "otodana-pc-v2";
 const pcLegacyTransferLimit = 128_000_000;
@@ -30,11 +32,11 @@ function waitForPCTransfer(delay, signal) {
   });
 }
 
-async function waitForPeerConnection(test, signal, timeout, interval = 100) {
+async function waitForPeerConnection(test, signal, timeout, interval = 100, message = "端末同士を接続できませんでした。同じWi-Fiで両方の音棚を開いたままお試しください。") {
   const deadline = performance.now() + timeout;
   while (!test()) {
     if (performance.now() >= deadline) {
-      throw new Error("端末同士を接続できませんでした。同じWi-Fiで両方の音棚を開いたままお試しください。");
+      throw new Error(message);
     }
     await waitForPCTransfer(interval, signal);
   }
@@ -66,7 +68,7 @@ function pcTransferInbox(channel, signal) {
       channel.close();
     }
   });
-  channel.addEventListener("close", () => stop(new Error("転送が切断されました。保存済みの項目はライブラリに残っています。")));
+  channel.addEventListener("close", () => stop(new Error(pcTransferInterrupted)));
   signal.addEventListener("abort", () => stop(signal.reason), { once: true });
   return async () => {
     signal.throwIfAborted();
@@ -74,7 +76,7 @@ function pcTransferInbox(channel, signal) {
     if (failure) throw failure;
     const data = await new Promise((resolve, reject) => {
       pending = { resolve, reject };
-      const timer = setTimeout(() => pending.reject(new Error("転送が止まりました。両方の画面を開いたまま、もう一度お試しください。")), 45_000);
+      const timer = setTimeout(() => pending.reject(new Error(pcTransferInterrupted)), pcTransferIdleTimeout);
       pending.resolve = (value) => { clearTimeout(timer); pending = null; resolve(value); };
       pending.reject = (error) => { clearTimeout(timer); pending = null; reject(error); };
     });
@@ -246,7 +248,8 @@ async function receivePCDetails(header, next, onChunk) {
 
 async function sendPCBlob(channel, blob, signal, onChunk = () => {}) {
   for (let offset = 0; offset < blob.size;) {
-    await waitForPeerConnection(() => channel.bufferedAmount <= 512_000 || channel.readyState !== "open", signal, 45_000, 30);
+    await waitForPeerConnection(() => channel.bufferedAmount <= 512_000 || channel.readyState !== "open", signal, pcTransferIdleTimeout, 30, pcTransferInterrupted);
+    if (channel.readyState !== "open") throw new Error(pcTransferInterrupted);
     const bytes = await blob.slice(offset, offset + pcTransferChunk).arrayBuffer();
     signal.throwIfAborted();
     channel.send(bytes);
@@ -425,6 +428,7 @@ function setupPCTransfer(library, setScreenActivity) {
   const codeDisplay = find("code");
   const progress = find("progress");
   const status = find("status");
+  const screenNote = find("screen-note");
   const selection = find("selection");
   const cancel = find("cancel");
   const chosen = new Set();
@@ -534,9 +538,10 @@ function setupPCTransfer(library, setScreenActivity) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "pc-transfer-folder";
-    button.innerHTML = '<span class="track-copy"><span class="track-name"></span><span class="track-artist"></span></span><span aria-hidden="true" class="pc-transfer-chevron">›</span>';
+    button.innerHTML = '<span class="track-copy"><span class="track-name"></span><span class="track-artist"></span></span><small></small><span aria-hidden="true" class="pc-transfer-chevron">›</span>';
     button.querySelector(".track-name").textContent = entry.name;
     button.querySelector(".track-artist").textContent = entry.tracks.length + " 曲";
+    button.querySelector("small").textContent = displayDownloadSize(entry.size);
     button.prepend(choiceArtwork(entry.tracks[0], true));
     button.addEventListener("click", () => {
       folder = entry;
@@ -683,7 +688,17 @@ function setupPCTransfer(library, setScreenActivity) {
     const enteredCode = normalizedCode();
     updateControls();
     status.setAttribute("data-loading", "");
-    setScreenActivity("transfer", true);
+    if (matchMedia("(pointer: coarse)").matches || navigator.standalone === true) {
+      screenNote.textContent = "同期が終わるまで、音棚を開いたままにしてください。";
+      screenNote.hidden = false;
+    }
+    setScreenActivity("transfer", true, (locked) => {
+      if (screenNote.hidden) return;
+      const message = locked
+        ? "画面の自動ロックを抑えています。同期が終わるまで音棚を開いてください。"
+        : "画面の自動ロックを防げません。同期が終わるまで画面を点灯させてください。";
+      if (screenNote.textContent !== message) screenNote.textContent = message;
+    });
     function useChannel(opened) {
       channel = opened;
       channel.binaryType = "arraybuffer";
@@ -761,6 +776,7 @@ function setupPCTransfer(library, setScreenActivity) {
       controller = null;
       status.removeAttribute("data-loading");
       setScreenActivity("transfer", false);
+      screenNote.hidden = true;
       find("pair").hidden = true;
       updateControls();
     }

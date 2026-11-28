@@ -78,15 +78,18 @@ const trackStore = {
     });
   },
 
-  deleteTracks(database, ids) {
+  deleteTracks(database, ids, layout) {
     return new Promise((resolve, reject) => {
-      const transaction = database.transaction(["tracks", "trackDetails"], "readwrite");
+      const stores = ["tracks", "trackDetails"];
+      if (layout) stores.push("settings");
+      const transaction = database.transaction(stores, "readwrite");
       const tracks = transaction.objectStore("tracks");
       const details = transaction.objectStore("trackDetails");
       for (const id of ids) {
         tracks.delete(id);
         details.delete(id);
       }
+      if (layout) transaction.objectStore("settings").put(layout, "library");
       transaction.oncomplete = () => resolve();
       transaction.onabort = () => reject(transaction.error);
     });

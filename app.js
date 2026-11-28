@@ -154,16 +154,21 @@ const marqueeObserver = typeof ResizeObserver === "function"
   ? new ResizeObserver((entries) => entries.forEach(({ target }) => measureMarquee(target))) : null;
 
 function createScreenWakeLock() {
-  if (!navigator.wakeLock?.request) return () => {};
+  if (!navigator.wakeLock?.request) return (_activity, active, report) => { if (active) report?.(false); };
   const touch = matchMedia("(pointer: coarse)");
-  const activities = new Set();
+  const activities = new Map();
   let pageActive = true;
   let sentinel;
   let requesting = false;
   let refreshQueued = false;
+  let transferRetryTimer;
 
   function shouldKeepScreenOn() {
-    return pageActive && !document.hidden && touch.matches && activities.size > 0;
+    return pageActive && !document.hidden && (touch.matches || navigator.standalone === true) && activities.size > 0;
+  }
+
+  function reportScreenLock(locked) {
+    for (const report of activities.values()) report?.(locked);
   }
 
   async function refresh() {
@@ -173,7 +178,10 @@ function createScreenWakeLock() {
       if (previous && !previous.released) await previous.release().catch(() => {});
       return;
     }
-    if (sentinel && !sentinel.released) return;
+    if (sentinel && !sentinel.released) {
+      reportScreenLock(true);
+      return;
+    }
     if (requesting) {
       refreshQueued = true;
       return;
@@ -184,13 +192,18 @@ function createScreenWakeLock() {
       if (!lock.released && shouldKeepScreenOn()) {
         sentinel = lock;
         lock.addEventListener("release", () => {
-          if (sentinel === lock) sentinel = undefined;
+          if (sentinel !== lock) return;
+          sentinel = undefined;
+          if (shouldKeepScreenOn()) reportScreenLock(false);
         }, { once: true });
+        reportScreenLock(true);
       } else if (!lock.released) {
         await lock.release();
+      } else if (shouldKeepScreenOn()) {
+        reportScreenLock(false);
       }
     } catch {
-      // Screen power settings can take priority over the app.
+      if (shouldKeepScreenOn()) reportScreenLock(false);
     } finally {
       requesting = false;
       if (refreshQueued) {
@@ -203,6 +216,7 @@ function createScreenWakeLock() {
   document.addEventListener("visibilitychange", refresh);
   document.addEventListener("pointerdown", refresh, { passive: true });
   touch.addEventListener("change", refresh);
+  window.addEventListener("focus", refresh);
   window.addEventListener("pagehide", () => {
     pageActive = false;
     refresh();
@@ -211,10 +225,14 @@ function createScreenWakeLock() {
     pageActive = true;
     refresh();
   });
-  return (activity, active) => {
+  return (activity, active, report) => {
     if (active === activities.has(activity)) return;
-    if (active) activities.add(activity);
+    if (active) activities.set(activity, report);
     else activities.delete(activity);
+    if (activity === "transfer") {
+      if (active && (touch.matches || navigator.standalone === true)) transferRetryTimer = setInterval(refresh, 15_000);
+      else clearInterval(transferRetryTimer);
+    }
     refresh();
   };
 }
@@ -1249,14 +1267,15 @@ async function restoreTracks() {
   }
 }
 
-function libraryLayout(folderEdit, addedTrack, addedId, destination = addedTrack?.folder) {
+function libraryLayout(folderEdit, addedTrack, addedId, destination = addedTrack?.folder, removal) {
   const savedIds = (entries) => entries.flatMap((track) => {
     const id = track === addedTrack ? addedId : track.id;
-    return id === undefined ? [] : [id];
+    return id === undefined || removal?.tracks.has(track) ? [] : [id];
   });
   const order = customTrackOrder ? savedIds(tracks) : [];
   if (customTrackOrder && addedTrack && !tracks.includes(addedTrack)) order.push(addedId);
-  const entries = folderEdit && !folders.includes(folderEdit.folder) ? [...folders, folderEdit.folder] : folders;
+  const entries = removal ? folders.filter((folder) => !removal.folders.has(folder))
+    : folderEdit && !folders.includes(folderEdit.folder) ? [...folders, folderEdit.folder] : folders;
   return {
     order,
     folders: entries.map((folder) => {
@@ -1447,23 +1466,29 @@ async function saveImportedTracks(added, invalid) {
   if (saved) showSaveToast(saved);
 }
 
-async function deleteTracks(entries) {
+async function deleteLibraryItems({ entries, folderMembers }) {
+  for (const [folder, members] of folderMembers) {
+    if (!folders.includes(folder) || folder.tracks.length !== members.size || folder.tracks.some((track) => !members.has(track))) {
+      tellLibrary("フォルダの内容が変わりました。削除する項目をもう一度選んでください。");
+      return false;
+    }
+  }
   if (entries.some((track) => track.busy || !tracks.includes(track))) {
     tellLibrary("処理中の曲が含まれています。完了後にもう一度お試しください。");
     return false;
   }
   const savedIds = entries.filter((track) => track.id !== undefined).map((track) => track.id);
+  const removed = new Set(entries);
   for (const track of entries) track.busy = "delete";
-  renderTracks();
   try {
-    if (savedIds.length) await trackStore.deleteTracks(database, savedIds);
+    const layout = database && (customTrackOrder || folders.length)
+      ? libraryLayout(null, undefined, undefined, undefined, { tracks: removed, folders: folderMembers }) : undefined;
+    if (savedIds.length || layout) await trackStore.deleteTracks(database, savedIds, layout);
   } catch {
     for (const track of entries) track.busy = null;
-    renderTracks();
-    tellLibrary("保存した曲を削除できませんでした。アプリを開き直してからお試しください。");
+    tellLibrary("選んだ項目を削除できませんでした。アプリを開き直してからお試しください。");
     return false;
   }
-  const removed = new Set(entries);
   for (const track of entries) {
     queue.remove(track, current === track);
     if (track.thumbnail) URL.revokeObjectURL(track.thumbnail);
@@ -1484,22 +1509,39 @@ async function deleteTracks(entries) {
   for (let index = tracks.length - 1; index >= 0; --index) {
     if (removed.has(tracks[index])) tracks.splice(index, 1);
   }
+  for (const folder of folderMembers.keys()) {
+    if (folder.coverUrl) URL.revokeObjectURL(folder.coverUrl);
+    folders.splice(folders.indexOf(folder), 1);
+  }
   for (const folder of folders) folder.tracks = folder.tracks.filter((track) => !removed.has(track));
+  if (folderMembers.has(playbackFolder)) playbackFolder = null;
   clearEditedTracks(entries);
   renderTracks();
-  tellLibrary(entries.length === 1 ? "「" + trackTitle(entries[0]) + "」を音棚から削除しました。"
-    : entries.length + "曲を音棚から削除しました。");
-  if (customTrackOrder || folders.length) await persistLibrary();
+  const description = folderMembers.size
+    ? [`${folderMembers.size}フォルダ`, ...(entries.length ? [deletionMediaCount(entries)] : [])].join("と")
+    : entries.length === 1 ? `「${trackTitle(entries[0])}」` : deletionMediaCount(entries);
+  tellLibrary(description + "を音棚から削除しました。");
   return true;
 }
 
-function confirmDeletion(entries) {
-  if (!entries.length || entries.some((track) => track.busy) || deleteDialog.open) return;
-  pendingDeletion = entries;
-  deleteDialog.returnValue = "";
-  get("delete-song").textContent = entries.length > 1 || trackSelection?.mode === "delete"
-    ? entries.length + "曲を音棚から削除します。"
-    : "「" + trackTitle(entries[0]) + "」を音棚から削除します。";
+function deletionMediaCount(entries) {
+  return entries.some(isVideo) ? `${entries.length}件の曲・動画` : `${entries.length}曲`;
+}
+
+function confirmDeletion(individualTracks, selectedFolders = []) {
+  if ((!individualTracks.length && !selectedFolders.length) || deleteDialog.open) return;
+  const folderMembers = new Map(selectedFolders.map((folder) => [folder, new Set(folder.tracks)]));
+  const nested = [...new Set(selectedFolders.flatMap((folder) => folder.tracks))];
+  const entries = [...new Set([...individualTracks, ...nested])];
+  if (entries.some((track) => track.busy)) return;
+  const folderName = selectedFolders.length === 1 ? `「${selectedFolders[0].name}」` : `${selectedFolders.length}フォルダ`;
+  const folderText = nested.length ? `${folderName}と、フォルダ内の${deletionMediaCount(nested)}をすべて削除します。`
+    : `${folderName}を削除します。フォルダ内の曲・動画は0件です。`;
+  pendingDeletion = { entries, folderMembers, saving: false };
+  get("delete-song").textContent = selectedFolders.length
+    ? folderText + (individualTracks.length ? ` 個別に選んだ${deletionMediaCount(individualTracks)}も削除します。` : "")
+    : entries.length > 1 || trackSelection?.mode === "delete" ? deletionMediaCount(entries) + "を音棚から削除します。"
+    : `「${trackTitle(entries[0])}」を音棚から削除します。`;
   deleteDialog.showModal();
 }
 
@@ -1972,7 +2014,8 @@ function openFolderMenu(folder) {
   get("menu-title").textContent = folder.name;
   get("menu-status").textContent = folder.tracks.length + " 曲";
   get("menu-rename-folder").disabled = !database;
-  showTrackMenuActions("menu-add", "menu-folder-details", "menu-rename-folder");
+  get("menu-delete-folder").disabled = folder.tracks.some((track) => track.busy);
+  showTrackMenuActions("menu-add", "menu-folder-details", "menu-rename-folder", ...(deleting ? ["menu-delete-folder"] : []));
 }
 
 function updateFolderPlayStats(folder) {
@@ -2093,7 +2136,8 @@ function openLibraryMenu() {
   get("menu-title").textContent = activeFolder ? activeFolder.name + "の設定" : "ライブラリの設定";
   get("menu-status").textContent = available.length + " 曲";
   get("menu-bulk-out").disabled = !available.length;
-  get("menu-bulk-delete").disabled = !available.some((track) => !track.busy);
+  const canDeleteFolder = !activeFolder && folders.some((folder) => folder.tracks.every((track) => !track.busy));
+  get("menu-bulk-delete").disabled = !canDeleteFolder && !available.some((track) => !track.busy);
   showTrackMenuActions("menu-bulk-delete", ...(activeFolder ? ["menu-bulk-out"] : []));
 }
 
@@ -2110,7 +2154,7 @@ function folderSize(folder) {
 
 function renderFolders(query) {
   folderList.replaceChildren();
-  if (activeFolder || trackSelection) return;
+  if (activeFolder || (trackSelection && trackSelection.mode !== "delete")) return;
   for (const folder of folders) {
     if (query && !containsQuery(folder.name, query)) continue;
     const row = document.createElement("li");
@@ -2122,7 +2166,10 @@ function renderFolders(query) {
     open.innerHTML = '<span class="thumb folder-icon" aria-hidden="true"><img alt="" hidden></span><span class="track-copy"><span class="track-name"></span><span class="track-artist"></span></span>';
     open.querySelector(".track-name").textContent = folder.name;
     open.querySelector(".track-artist").textContent = folder.tracks.length + " 曲";
-    open.addEventListener("click", () => showFolder(folder));
+    open.addEventListener("click", (event) => {
+      if (trackSelection?.mode === "delete") selectLibraryRow(row, event);
+      else showFolder(folder);
+    });
     const more = document.createElement("button");
     more.type = "button";
     more.className = "more";
@@ -2133,6 +2180,7 @@ function renderFolders(query) {
     actions.className = "folder-actions";
     actions.append(more, libraryMediaSize(folderSize(folder)));
     row.append(open, actions);
+    if (trackSelection?.mode === "delete") updateSelectionRow(row);
     folderList.append(row);
     const thumbnail = open.querySelector(".folder-icon");
     const first = folder.tracks[0];
@@ -2164,6 +2212,8 @@ function setTrackSelection(mode, folder = activeFolder) {
   } else {
     delete list.dataset.selecting;
   }
+  if (mode === "delete") folderList.dataset.selecting = mode;
+  else delete folderList.dataset.selecting;
   search.value = "";
   filterLibrary();
   (mode ? get("selection-cancel") : librarySettings).focus({ preventScroll: true });
@@ -2172,10 +2222,38 @@ function setTrackSelection(mode, folder = activeFolder) {
 function updateSelectionRow(row) {
   const button = row.querySelector(".track-select");
   const selection = trackSelection ?? editSelection;
-  const selected = Boolean(selection?.chosen.has(row.track));
+  const selected = Boolean(selection?.chosen.has(row.track ?? row.folder));
   row.toggleAttribute("data-selected", selected);
   if (selection) button.setAttribute("aria-pressed", String(selected));
   else button.removeAttribute("aria-pressed");
+}
+
+function selectLibraryRow(row, event) {
+  const selection = trackSelection ?? editSelection;
+  const { chosen, anchor, saving } = selection;
+  const entry = row.track ?? row.folder;
+  const canSelect = (item) => item.track
+    ? !(selection === editSelection || selection.mode === "delete") || !item.track.busy
+    : item.folder.tracks.every((track) => !track.busy);
+  if (saving || !canSelect(row)) return;
+  const visibleRows = event.shiftKey && anchor
+    ? [...(selection.mode === "delete" ? folderList.children : []), ...list.children] : [];
+  const range = selectionRange(visibleRows, visibleRows.find((item) => (item.track ?? item.folder) === anchor), row);
+  if (range.length) {
+    const selecting = selection !== editSelection || chosen.has(anchor);
+    for (const item of range) {
+      if (!canSelect(item)) continue;
+      const entry = item.track ?? item.folder;
+      if (selecting) chosen.add(entry);
+      else chosen.delete(entry);
+      updateSelectionRow(item);
+    }
+  } else {
+    if (!chosen.delete(entry)) chosen.add(entry);
+    selection.anchor = entry;
+    updateSelectionRow(row);
+  }
+  selectionConfirm.disabled = !chosen.size;
 }
 
 function renderTracks() {
@@ -2204,29 +2282,7 @@ function renderTracks() {
     select.className = "track-select";
     select.innerHTML = '<span class="thumb" aria-hidden="true"><img alt="" hidden></span><span class="track-copy"><span class="track-name"></span><span class="track-artist" hidden></span></span>';
     select.addEventListener("click", (event) => {
-      const selection = trackSelection ?? editSelection;
-      if (selection) {
-        const { chosen, anchor, saving } = selection;
-        const skipBusy = selection === editSelection || selection.mode === "delete";
-        if (saving || (skipBusy && track.busy)) return;
-        const visibleRows = event.shiftKey && anchor ? Array.from(list.children) : [];
-        const range = selectionRange(visibleRows, visibleRows.find((item) => item.track === anchor), row);
-        if (range.length) {
-          const selecting = selection !== editSelection || chosen.has(anchor);
-          for (const item of range) {
-            if (skipBusy && item.track.busy) continue;
-            if (selecting) chosen.add(item.track);
-            else chosen.delete(item.track);
-            updateSelectionRow(item);
-          }
-        } else {
-          if (!chosen.delete(track)) chosen.add(track);
-          selection.anchor = track;
-          updateSelectionRow(row);
-        }
-        selectionConfirm.disabled = !chosen.size;
-        return;
-      }
+      if (trackSelection || editSelection) return selectLibraryRow(row, event);
       selectTrack(track, false, matches, query);
       showView("player");
     });
@@ -2602,7 +2658,7 @@ selectionConfirm.addEventListener("click", async () => {
   const { chosen, folder, mode } = selection;
   const entries = visibleLibraryTracks().filter((track) => chosen.has(track));
   if (mode === "delete") {
-    confirmDeletion(entries);
+    confirmDeletion(entries, activeFolder ? [] : folders.filter((entry) => chosen.has(entry)));
     return;
   }
   selection.saving = true;
@@ -2612,23 +2668,33 @@ selectionConfirm.addEventListener("click", async () => {
   if (trackSelection === selection) setTrackSelection(null);
   else renderTracks();
 });
-deleteDialog.addEventListener("close", async () => {
-  const entries = pendingDeletion;
-  pendingDeletion = null;
-  if (!entries || deleteDialog.returnValue !== "delete") return;
+deleteDialog.addEventListener("close", () => {
+  if (!deleteDialog.open) pendingDeletion = null;
+});
+deleteDialog.addEventListener("cancel", (event) => {
+  if (pendingDeletion?.saving) event.preventDefault();
+});
+deleteDialog.querySelector("form").addEventListener("submit", async (event) => {
+  if (event.submitter?.value === "cancel" && !pendingDeletion?.saving) return;
+  event.preventDefault();
+  const deletion = pendingDeletion;
+  if (!deletion || deletion.saving) return;
+  deletion.saving = true;
+  const buttons = deleteDialog.querySelectorAll("button");
+  for (const button of buttons) button.disabled = true;
+  selectionConfirm.disabled = true;
   const selection = trackSelection;
-  if (selection) {
-    selection.saving = true;
-    get("selection-cancel").disabled = true;
+  let deleted;
+  try {
+    deleted = await deleteLibraryItems(deletion);
+  } finally {
+    deleteDialog.close();
+    pendingDeletion = null;
+    for (const button of buttons) button.disabled = false;
   }
-  const deleted = await deleteTracks(entries);
   if (selection && trackSelection === selection) {
     if (deleted) setTrackSelection(null);
-    else {
-      selection.saving = false;
-      get("selection-cancel").disabled = false;
-      renderTracks();
-    }
+    else selectionConfirm.disabled = !selection.chosen.size;
   } else if (document.activeElement === document.body) {
     (deleteMode.disabled ? librarySettings : deleteMode).focus({ preventScroll: true });
   }
@@ -3049,6 +3115,10 @@ get("menu-delete").addEventListener("click", () => {
     closeTrackMenu(() => confirmDeletion(entries));
   }
 });
+get("menu-delete-folder").addEventListener("click", () => {
+  const folder = menuFolder;
+  if (folder) closeTrackMenu(() => confirmDeletion([], [folder]));
+});
 get("previous").addEventListener("click", () => move(-1));
 get("next").addEventListener("click", () => move(1));
 get("mini-next").addEventListener("click", () => move(1));
@@ -3413,7 +3483,13 @@ setupPCTransfer({
     await storageReady;
     return {
       root: rootTracks(),
-      folders: folders.map((folder) => ({ name: folder.name, tracks: [...folder.tracks], cover: folder.cover, source: folder })),
+      folders: folders.map((folder) => ({
+        name: folder.name,
+        tracks: [...folder.tracks],
+        size: folderSize(folder),
+        cover: folder.cover,
+        source: folder,
+      })),
     };
   },
   async hasTrack(pcTransferId) {

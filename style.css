@@ -435,7 +435,7 @@ body[data-artwork-loading] :is(.mini-open, .queue-current) .thumb,
   padding: 0 10px;
   font-size: 13px;
 }
-.tracks[data-selecting] .track-actions { display: none; }
+.tracks[data-selecting] :is(.track-actions, .folder-actions) { display: none; }
 .folder-row[data-drop-target] { background: var(--selected); }
 .library-track-area, #tracks { position: relative; }
 .library-track-area { isolation: isolate; --library-insert-line-height: 4px; }
@@ -1386,9 +1386,9 @@ body[data-video-expanded]:not([data-video-controls]) .player-controls {
 .pc-transfer-track:has(input:disabled:not(:checked)) { color: var(--muted); }
 :is(.pc-transfer-folder-row, .pc-transfer-track) input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 .pc-transfer-folder-row input { cursor: pointer; }
-.pc-transfer-track small { color: var(--muted); font-size: 11px; }
+:is(.pc-transfer-track, .pc-transfer-folder) small { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .pc-transfer-folder {
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   width: 100%;
   text-align: start;
   background: transparent;

@@ -10,13 +10,13 @@
   <link rel="icon" href="icon-192.png?v=40">
   <link rel="apple-touch-icon" href="icon-192.png?v=40">
   <link rel="manifest" href="manifest.webmanifest?v=40">
-  <link rel="stylesheet" href="style.css?v=67">
-  <script src="storage.js?v=57" defer></script>
+  <link rel="stylesheet" href="style.css?v=70">
+  <script src="storage.js?v=70" defer></script>
   <script src="artwork.js?v=50" defer></script>
   <script src="queue.js?v=67" defer></script>
   <script src="download.js?v=59" defer></script>
-  <script src="pc-transfer.js?v=61" defer></script>
-  <script src="app.js?v=67" defer></script>
+  <script src="pc-transfer.js?v=69" defer></script>
+  <script src="app.js?v=70" defer></script>
 </head>
 <body data-view="library">
   <svg class="icon-definitions" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
@@ -53,7 +53,7 @@
           <button type="button" id="folder-back" hidden>‹ ライブラリ</button>
           <div class="library-title-row">
             <h1 id="library-title" tabindex="-1">ライブラリ</h1>
-            <span id="app-version" aria-label="バージョン67">v67</span>
+            <span id="app-version" aria-label="バージョン70">v70</span>
           </div>
           <div class="library-summary">
             <span id="track-count">0 曲</span>
@@ -366,6 +366,7 @@
     </div>
     <progress id="pc-transfer-progress" max="100" aria-label="転送の進み具合" hidden></progress>
     <p id="pc-transfer-status" class="feedback" role="status"></p>
+    <p id="pc-transfer-screen-note" class="feedback" hidden></p>
     <button type="button" id="pc-transfer-settings" class="connection-settings" aria-haspopup="dialog" aria-controls="download-config">取得サーバーの設定 <span aria-hidden="true">›</span></button>
     <button type="button" id="pc-transfer-cancel" class="action action-secondary" hidden>中止</button>
   </dialog>
@@ -400,6 +401,7 @@
     <button type="button" id="menu-add" class="save" hidden><span aria-hidden="true">＋</span> フォルダへ一括追加</button>
     <button type="button" id="menu-folder-details" class="save" hidden><svg class="ui-icon" aria-hidden="true"><use href="#icon-pencil"/></svg>フォルダの情報・編集</button>
     <button type="button" id="menu-rename-folder" class="save" hidden><svg class="ui-icon" aria-hidden="true"><use href="#icon-pencil"/></svg>フォルダ名を変更</button>
+    <button type="button" id="menu-delete-folder" class="delete" hidden><svg class="ui-icon" aria-hidden="true"><use href="#icon-trash"/></svg>フォルダを削除</button>
     <button type="button" id="menu-move-out" class="save" hidden><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder-out"/></svg>フォルダから出す</button>
     <button type="button" id="menu-bulk-out" class="save" hidden><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder-out"/></svg>フォルダから一括で出す</button>
     <button type="button" id="menu-bulk-delete" class="delete" hidden><svg class="ui-icon" aria-hidden="true"><use href="#icon-trash"/></svg>一括削除</button>
