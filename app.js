@@ -116,6 +116,7 @@ let artworkUrl = null;
 let artworkTrack = null;
 let artworkRequest = 0;
 let playRequest = 0;
+let backgroundAdvance = null;
 let menuTrack = null;
 let pendingDeletion = null;
 let deleting = false;
@@ -161,10 +162,20 @@ function createScreenWakeLock() {
   let sentinel;
   let requesting = false;
   let refreshQueued = false;
-  let transferRetryTimer;
+  let retryTimer;
 
   function shouldKeepScreenOn() {
     return pageActive && !document.hidden && (touch.matches || navigator.standalone === true) && activities.size > 0;
+  }
+
+  function refreshScreenLock() {
+    if (shouldKeepScreenOn() && (activities.has("transfer") || activities.has("playback"))) {
+      retryTimer ??= setInterval(refresh, 15_000);
+    } else {
+      clearInterval(retryTimer);
+      retryTimer = undefined;
+    }
+    refresh();
   }
 
   function reportScreenLock(locked) {
@@ -213,27 +224,23 @@ function createScreenWakeLock() {
     }
   }
 
-  document.addEventListener("visibilitychange", refresh);
+  document.addEventListener("visibilitychange", refreshScreenLock);
   document.addEventListener("pointerdown", refresh, { passive: true });
-  touch.addEventListener("change", refresh);
+  touch.addEventListener("change", refreshScreenLock);
   window.addEventListener("focus", refresh);
   window.addEventListener("pagehide", () => {
     pageActive = false;
-    refresh();
+    refreshScreenLock();
   });
   window.addEventListener("pageshow", () => {
     pageActive = true;
-    refresh();
+    refreshScreenLock();
   });
   return (activity, active, report) => {
     if (active === activities.has(activity)) return;
     if (active) activities.set(activity, report);
     else activities.delete(activity);
-    if (activity === "transfer") {
-      if (active && (touch.matches || navigator.standalone === true)) transferRetryTimer = setInterval(refresh, 15_000);
-      else clearInterval(transferRetryTimer);
-    }
-    refresh();
+    refreshScreenLock();
   };
 }
 
@@ -847,6 +854,10 @@ async function play() {
       updateSelection();
       return play();
     }
+    if (backgroundAdvance?.track === current && document.hidden && error.name === "NotAllowedError") {
+      updatePlayback();
+      return;
+    }
     tellPlayer(error.name === "NotAllowedError"
       ? "再生ボタンを押して再生を始めてください。"
       : playbackError());
@@ -896,21 +907,24 @@ function setBackdrop(image) {
   });
 }
 
-function clearSource(nextIsVideo = false) {
+function clearSource(nextIsVideo = false, keepAudioSource = false) {
   clearQueueArtworkMotion();
   clearQueueVideoMotion();
   ++playRequest;
+  backgroundAdvance = null;
   seekDrag = null;
   resumePosition = null;
-  media.pause();
+  if (!keepAudioSource) media.pause();
   if (media === video || companionVideoUrl) {
     if (!nextIsVideo) closeVideoExpanded();
     clearVideoTaps();
   }
-  media.removeAttribute("src");
-  media.load();
-  if (objectUrl) URL.revokeObjectURL(objectUrl);
-  objectUrl = null;
+  if (!keepAudioSource) {
+    media.removeAttribute("src");
+    media.load();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    objectUrl = null;
+  }
   if (companionVideoUrl) {
     video.pause();
     video.removeAttribute("src");
@@ -1033,7 +1047,7 @@ async function showArtwork(track) {
   }
 }
 
-function selectTrack(track, followQueue = false, scope, query = "") {
+function selectTrack(track, followQueue = false, scope, query = "", automatic = false) {
   if (!track) return;
   const folder = track.folder ?? null;
   if (!followQueue) {
@@ -1041,24 +1055,36 @@ function selectTrack(track, followQueue = false, scope, query = "") {
     playbackQuery = query;
     queue.start(scope ?? folder?.tracks ?? rootTracks(), track);
   }
-  if (current !== track) {
-    loadTrack(track);
+  const changed = current !== track;
+  backgroundAdvance = null;
+  if (changed) {
+    loadTrack(track, null, automatic);
   } else if (media.ended || followQueue) {
     recordedCurrent = false;
     media.currentTime = 0;
   }
   playbackTracking = true;
+  const playBeforeRender = automatic && media === audio;
+  if (playBeforeRender) {
+    if (document.hidden) backgroundAdvance = { track, checking: false };
+    // Keep the audio hand-off in the media event before any artwork or list work.
+    play();
+  }
+  if (automatic && changed) showArtwork(track);
   tellLibrary("");
   updateSelection();
-  play();
+  if (!playBeforeRender) play();
 }
 
-function loadTrack(track, position = null) {
+function loadTrack(track, position = null, automatic = false) {
   const videoTrack = isVideo(track);
   const audioType = videoAudioType(track);
-  clearSource(videoTrack);
+  const nextMedia = videoTrack && !audioType ? video : audio;
+  const keepAudioSource = automatic && media === audio && nextMedia === audio && Boolean(objectUrl);
+  const previousUrl = keepAudioSource ? objectUrl : null;
+  clearSource(videoTrack, keepAudioSource);
   current = track;
-  media = videoTrack && !audioType ? video : audio;
+  media = nextMedia;
   recordedCurrent = false;
   resumePosition = position;
   video.muted = Boolean(audioType);
@@ -1070,7 +1096,8 @@ function loadTrack(track, position = null) {
   const source = audioType ? track.blob.slice(0, track.blob.size, audioType) : track.blob;
   objectUrl = URL.createObjectURL(source);
   media.src = objectUrl;
-  showArtwork(track);
+  if (previousUrl) URL.revokeObjectURL(previousUrl);
+  if (!automatic) showArtwork(track);
 }
 
 function alignCompanionVideo() {
@@ -1089,16 +1116,50 @@ function syncCompanionVideo() {
   if (audio.paused || audio.ended || audio.error) video.pause();
   else if (video.paused) video.play().catch(() => {});
 }
-function move(offset) {
+function move(offset, automatic = false) {
   if (!current) return false;
   const track = offset < 0 ? queue.back(current) : queue.forward(current);
   if (!track) return false;
-  selectTrack(track, true);
+  selectTrack(track, true, undefined, "", automatic);
   return true;
+}
+
+function advanceAfterEnd() {
+  if (!current || !media.ended) return false;
+  if (!move(1, true)) {
+    syncCompanionVideo();
+    updatePlayback();
+    rememberPlayback();
+  }
+  return true;
+}
+
+function resumeAudioOnReturn() {
+  if (document.hidden) return;
+  if (media === audio && advanceAfterEnd()) return;
+  const advance = backgroundAdvance;
+  if (advance?.track !== current || advance.checking || media !== audio) return;
+  if (audio.currentTime > .05 && !audio.paused) {
+    backgroundAdvance = null;
+    return;
+  }
+  advance.checking = true;
+  play();
+  const request = playRequest;
+  setTimeout(() => {
+    if (backgroundAdvance !== advance || request !== playRequest) return;
+    advance.checking = false;
+    if (document.hidden) return;
+    backgroundAdvance = null;
+    if (audio.currentTime > .05 && !audio.paused) return;
+    audio.load();
+    play();
+  }, 2500);
 }
 
 function togglePlayback() {
   if (!current) return;
+  backgroundAdvance = null;
   if (media.paused || media.ended || media.error) {
     if (media.ended) {
       recordedCurrent = false;
@@ -1112,6 +1173,7 @@ function togglePlayback() {
 
 function pause() {
   ++playRequest;
+  backgroundAdvance = null;
   media.pause();
   syncCompanionVideo();
 }
@@ -3420,6 +3482,7 @@ for (const event of ["loadedmetadata", "durationchange", "timeupdate", "seeked"]
 }
 for (const event of ["play", "playing", "pause"]) {
   onActiveMedia(event, () => {
+    if (event === "pause" && media === audio && advanceAfterEnd()) return;
     syncCompanionVideo();
     updatePlayback();
   });
@@ -3431,6 +3494,7 @@ onActiveMedia("seeked", updatePlayback);
 onActiveMedia("seeked", () => rememberPlayback());
 onActiveMedia("pause", () => rememberPlayback());
 onActiveMedia("timeupdate", () => {
+  if (backgroundAdvance && !media.paused && media.currentTime > .05) backgroundAdvance = null;
   if (!video.paused) alignCompanionVideo();
   if (!media.paused && performance.now() - lastCheckpoint >= 2000) rememberPlayback();
 });
@@ -3447,14 +3511,7 @@ onActiveMedia("playing", () => {
   rememberPlayback();
   if (player.dataset.queue === "true") renderQueue(true);
 });
-onActiveMedia("ended", () => {
-  if (!media.ended || !current) return;
-  if (!move(1)) {
-    syncCompanionVideo();
-    updatePlayback();
-    rememberPlayback();
-  }
-});
+onActiveMedia("ended", advanceAfterEnd);
 onActiveMedia("error", () => {
   if (!current || !media.error) return;
   syncCompanionVideo();
@@ -3466,7 +3523,9 @@ onActiveMedia("error", () => {
 document.addEventListener("visibilitychange", () => {
   syncCompanionVideo();
   if (document.hidden) rememberPlayback();
+  else resumeAudioOnReturn();
 });
+window.addEventListener("pageshow", (event) => { if (event.persisted) resumeAudioOnReturn(); });
 if (!desktopPlayback && navigator.audioSession) {
   const audioSession = navigator.audioSession;
   audioSession.type = "playback";
@@ -3525,8 +3584,8 @@ if (mediaSession) {
   const actions = {
     play: () => { if (media.paused || media.ended) togglePlayback(); },
     pause,
-    previoustrack: () => move(-1),
-    nexttrack: () => move(1),
+    previoustrack: () => move(-1, document.hidden),
+    nexttrack: () => move(1, document.hidden),
   };
   for (const [action, handler] of Object.entries(actions)) {
     try {
