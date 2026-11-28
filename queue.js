@@ -147,6 +147,13 @@ function bindQueueGestures(list, getScrollArea, actions, reducedMotion) {
     const offset = event.clientY - drag.y + scrollArea.scrollTop - drag.scroll;
     actions.previewDrop?.(event);
     drag.target = Math.max(0, Math.min(drag.rows.length - 1, drag.index + Math.round(offset / drag.height)));
+    if (drag.group) {
+      for (const item of drag.group) {
+        item.dataset.gesture = "reorder";
+        item.style.setProperty("--queue-shift", offset + "px");
+      }
+      return;
+    }
     row.style.setProperty("--queue-shift", offset + "px");
     for (const [index, neighbor] of drag.rows.entries()) {
       if (neighbor === row) continue;
@@ -193,10 +200,13 @@ function bindQueueGestures(list, getScrollArea, actions, reducedMotion) {
     const rows = Array.from(list.children);
     const index = rows.indexOf(row);
     const scrollArea = getScrollArea();
+    const group = actions.group?.(row.track);
+    const groupedTracks = group?.length > 1 ? new Set(group) : null;
     drag = {
       id: event.pointerId, x: event.clientX, y: event.clientY,
       row, rows, index, target: index, handle, mode: "",
       height: row.offsetHeight, scrollArea, scroll: scrollArea.scrollTop,
+      group: groupedTracks ? rows.filter((item) => groupedTracks.has(item.track)) : null,
     };
   });
 
@@ -265,18 +275,25 @@ function bindQueueGestures(list, getScrollArea, actions, reducedMotion) {
   list.addEventListener("keydown", (event) => {
     if (!event.target.closest(".queue-handle")) return;
     const row = event.target.closest(".queue-row");
-    const index = Array.from(list.children).indexOf(row);
+    const rows = Array.from(list.children);
+    const index = rows.indexOf(row);
     const removes = canSwipe && ["Delete", "Backspace"].includes(event.key);
     if (!removes && !["ArrowUp", "ArrowDown"].includes(event.key)) return;
     event.preventDefault();
     const before = positions();
-    const target = index + (event.key === "ArrowUp" ? -1 : 1);
+    const step = event.key === "ArrowUp" ? -1 : 1;
+    let target = index + step;
+    const group = actions.group?.(row.track);
+    if (group?.length > 1) {
+      const moving = new Set(group);
+      while (rows[target] && moving.has(rows[target].track)) target += step;
+    }
     if (removes) {
       actions.remove(row.track);
       list.children[Math.min(index, list.children.length - 1)]?.querySelector(".queue-handle").focus();
     } else if (target >= 0 && target < list.children.length) {
       actions.reorder(row.track, target);
-      list.children[target]?.querySelector(".queue-handle").focus();
+      (group?.length > 1 ? row : list.children[target])?.querySelector(".queue-handle").focus();
     }
     animateFrom(before);
   });

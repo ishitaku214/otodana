@@ -363,15 +363,20 @@ function youtubeWatchUrl(id) {
   return "https://www.youtube.com/watch?v=" + id;
 }
 
-async function fetchYoutubeArtwork(url, signal) {
+function sourceThumbnailUrl(value) {
+  const url = downloadPageUrl(value);
+  return url && ["i.ytimg.com", "img.cdn.nimg.jp", "nicovideo.cdn.nimg.jp", "goptim.video.nimg.jp"].includes(url.hostname) ? url.href : null;
+}
+
+async function fetchDownloadArtwork(url, signal) {
   if (!url || signal.aborted) return null;
   try {
     const response = await fetch(url, {
       signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]),
-      credentials: "omit", referrerPolicy: "no-referrer",
+      credentials: "omit", referrerPolicy: "no-referrer", redirect: "error",
     });
     const type = response.headers.get("Content-Type")?.split(";")[0];
-    if (!response.ok || type !== "image/jpeg" || Number(response.headers.get("Content-Length")) > 2_000_000) return null;
+    if (!response.ok || !["image/jpeg", "image/png", "image/webp"].includes(type) || Number(response.headers.get("Content-Length")) > 2_000_000) return null;
     const cover = await response.blob();
     return !signal.aborted && cover.size > 0 && cover.size <= 2_000_000 ? cover : null;
   } catch {
@@ -403,7 +408,7 @@ async function squareAudioArtwork(cover, minimumSide = 1) {
 }
 
 async function audioDownloadArtwork(mediaUrl, preview, signal) {
-  const original = await fetchYoutubeArtwork(youtubePreviewUrl(mediaUrl, "maxresdefault"), signal);
+  const original = await fetchDownloadArtwork(youtubePreviewUrl(mediaUrl, "maxresdefault"), signal);
   const cover = await squareAudioArtwork(original, 320);
   if (cover || signal.aborted) return cover;
   const fallback = await preview;
@@ -421,7 +426,7 @@ async function estimateDownload(item, request) {
     (response.status === 422 && estimate?.message === "配信元から取得または変換できませんでした。時間をおいて試してください。"))) {
     return null;
   }
-  throw new Error(typeof estimate?.message === "string" ? estimate.message : "動画の容量を確認できませんでした。");
+  throw new Error(typeof estimate?.message === "string" ? estimate.message : "動画の容量を確認できませんでした。", { cause: estimate?.code });
 }
 
 function selectedDownloadEstimate(item) {
@@ -455,8 +460,7 @@ function isYoutubePlaylist(url) {
 }
 
 function defaultFormatForLink(url) {
-  const music = url?.hostname === "music.youtube.com" ||
-    (isYoutubePlaylist(url) && url.searchParams.get("list").startsWith("OLAK5uy_"));
+  const music = isYoutubePlaylist(url) && (url.hostname === "music.youtube.com" || url.searchParams.get("list").startsWith("OLAK5uy_"));
   return music ? "wav" : "mp4";
 }
 
@@ -501,6 +505,7 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
   setupDownloadSettings(setScreenActivity);
   const find = (id) => document.getElementById(id);
   const dialog = find("download-dialog");
+  const destinationLabel = find("download-destination");
   const list = find("download-rows");
   const template = find("download-row-template");
   const settingsButton = find("download-settings");
@@ -525,6 +530,7 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
   let nextRowId = 0;
   let job;
   let approval;
+  let destination = null;
   let importing = false;
   let pcConnectedAt = 0;
 
@@ -555,7 +561,7 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
   }, { root: dialog, rootMargin: "100px" }) : null;
 
   function updatePreview(row) {
-    const url = youtubePreviewUrl(rowMediaUrl(row, row.input.value.trim()));
+    const url = youtubePreviewUrl(row.input.value.trim()) ?? row.sourceThumbnail;
     if (url === row.previewUrl) return;
     row.previewUrl = url;
     clearPreview(row);
@@ -563,7 +569,7 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
     if (!url) return;
     const controller = new AbortController();
     row.preview = controller;
-    row.cover = fetchYoutubeArtwork(url, controller.signal).then((cover) => {
+    row.cover = fetchDownloadArtwork(url, controller.signal).then((cover) => {
       if (!cover || controller.signal.aborted) return null;
       row.image.src = URL.createObjectURL(cover);
       row.image.hidden = false;
@@ -598,7 +604,9 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
       .map((row) => ({
         ...downloadItemFields({ url: row.input.value, format: rowFormat(row), quality: row.quality.value }),
         formatChosen: row.formatChosen,
-        albumTrackId: row.albumTrackId,
+        quality: row.quality.value,
+        audioFormat: row.audioFormat.value,
+        mediaKind: row.mediaKind,
         info: row.sourceInfo,
         edits: Object.fromEntries(row.fields.filter((field) => "edited" in field.dataset)
           .map((field) => [field.dataset.field, field.value])),
@@ -616,15 +624,18 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
     return row.formats[0].checked ? "mp4" : row.audioFormat.value;
   }
 
-  function rowMediaUrl(row, url) {
-    return row.albumTrackId && rowFormat(row) !== "mp4" ? youtubeWatchUrl(row.albumTrackId) : url;
+  function setRowMediaKind(row, kind) {
+    if (kind !== "audio" && kind !== "video") return;
+    row.mediaKind = kind;
+    if (kind === "audio") row.formats[1].checked = true;
+    else if (!row.formatChosen) row.formats[0].checked = true;
   }
 
   function showQualitySizes(row, sizes) {
     for (const option of row.quality.options) {
       const bytes = sizes?.[option.value]?.savedBytes;
-      const size = Number.isFinite(bytes) ? "約 " + displayDownloadSize(bytes) : "容量不明";
-      option.textContent = sizes ? option.dataset.label + " · " + size : option.dataset.label;
+      const size = Number.isFinite(bytes) ? "約" + displayDownloadSize(bytes).replace(" ", "") : "容量不明";
+      option.textContent = sizes ? option.dataset.label + "[" + size + "]" : option.dataset.label;
     }
   }
 
@@ -637,6 +648,10 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
       row.sourceInfo[key] = value;
       if (!("edited" in field.dataset)) field.value = value;
     }
+    const thumbnail = sourceThumbnailUrl(info.thumbnail);
+    if (thumbnail) row.sourceThumbnail = thumbnail;
+    if (row.sourceThumbnail) row.sourceInfo.thumbnail = row.sourceThumbnail;
+    setRowMediaKind(row, info.kind);
   }
 
   function appendRow(url = "", format = null, quality = defaultDownloadQuality, before = null, saved = null) {
@@ -649,9 +664,10 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
       fields: Array.from(element.querySelectorAll("input[data-field]")),
       detailsUrl: downloadPageUrl(url)?.href,
       image: query("img"),
+      formatToggle: query(".download-format"),
+      audioOnly: query(".download-audio-only"),
       formats: Array.from(element.querySelectorAll('input[type="radio"]')),
       formatChosen: saved?.formatChosen ?? (format !== null),
-      albumTrackId: typeof saved?.albumTrackId === "string" && /^[\w-]{11}$/.test(saved.albumTrackId) ? saved.albumTrackId : undefined,
       quality: query(".download-quality"),
       audioFormat: query(".download-audio-format"),
       info: query(".download-row-info"),
@@ -677,29 +693,27 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
     for (const option of row.quality.options) option.dataset.label = option.textContent;
     if (Array.from(row.quality.options).some((option) => option.value === quality)) row.quality.value = quality;
     const initialFormat = format ?? defaultFormatForLink(downloadPageUrl(url));
-    row.audioFormat.value = initialFormat === "mp3" ? "mp3" : "wav";
+    row.audioFormat.value = saved?.audioFormat === "mp3" || initialFormat === "mp3" ? "mp3" : "wav";
     for (const option of row.formats) {
       option.name = group;
       option.checked = option.value === (initialFormat === "mp4" ? "mp4" : "audio");
-      option.addEventListener("change", () => {
-        row.formatChosen = true;
-        setRowState(row);
-        showQualitySizes(row);
-        if (row.albumTrackId) updatePreview(row);
-        persistRows();
-        updateControls();
-      });
+      option.addEventListener("change", () => changeRowFormat(row));
     }
-    row.audioFormat.addEventListener("change", () => {
-      row.formatChosen = true;
-      setRowState(row);
-      persistRows();
-    });
+    setRowMediaKind(row, saved?.mediaKind);
+    row.audioFormat.addEventListener("change", () => changeRowFormat(row));
     row.quality.addEventListener("change", () => {
       persistRows();
+      if (approval?.rejected.has(row)) {
+        changeRowFormat(row);
+        return;
+      }
       const item = approval?.items.find((entry) => entry.row === row);
       if (item) {
         item.quality = row.quality.value;
+        if (item.needsEstimate) {
+          changeRowFormat(row);
+          return;
+        }
         renderEstimateRow(item);
         renderEstimateSummary();
         updateControls();
@@ -711,7 +725,9 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
       const url = downloadPageUrl(row.input.value.trim());
       if (row.detailsUrl && row.detailsUrl !== url?.href) {
         row.sourceInfo = undefined;
-        row.albumTrackId = undefined;
+        row.sourceThumbnail = undefined;
+        row.mediaKind = undefined;
+        row.formatChosen = false;
         for (const field of row.fields) {
           field.value = "";
           delete field.dataset.edited;
@@ -734,7 +750,17 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
       updateControls();
     });
     row.clear.addEventListener("click", () => {
-      if (job || approval || importing || !rows.includes(row)) return;
+      if (job || importing || !rows.includes(row)) return;
+      if (approval) {
+        const index = approval.items.findIndex((item) => item.row === row);
+        if (index >= 0) approval.items.splice(index, 1);
+        else {
+          approval.rejected.delete(row);
+          approval.excluded = Math.max(0, approval.excluded - 1);
+        }
+        if (approval.items.length) renderEstimateSummary();
+        else approval = null;
+      }
       removeRow(row);
       ensureBlankRow();
       numberRows();
@@ -773,24 +799,29 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
 
   function updateControls() {
     const locked = Boolean(job || approval || importing);
+    const busy = Boolean(job || importing);
     for (const element of [settingsButton, csvButton]) element.disabled = locked;
     for (const row of rows) {
+      const editingFormat = !busy && (!approval || approval.items.some((item) => item.row === row) || approval.rejected.has(row));
+      const audioOnly = row.mediaKind === "audio";
       row.input.disabled = locked;
       row.details.hidden = !row.detailsUrl;
       row.clear.hidden = !row.input.value.trim();
-      for (const field of row.fields) field.disabled = Boolean(job || importing);
+      for (const field of row.fields) field.disabled = busy;
+      row.formatToggle.hidden = audioOnly;
+      row.audioOnly.hidden = !audioOnly;
       row.quality.parentElement.hidden = rowFormat(row) !== "mp4";
       row.audioFormat.parentElement.hidden = rowFormat(row) === "mp4";
-      row.audioFormat.disabled = locked;
-      row.quality.disabled = Boolean(job || importing || (approval && !approval.items.some((item) => item.row === row)));
-      row.clear.disabled = locked || !row.input.value.trim();
-      for (const format of row.formats) format.disabled = locked;
+      row.audioFormat.disabled = !editingFormat;
+      row.quality.disabled = !editingFormat;
+      row.clear.disabled = busy || !row.input.value.trim();
+      for (const format of row.formats) format.disabled = !editingFormat || audioOnly;
     }
     estimatePanel.hidden = !approval;
     startActions.hidden = Boolean(approval);
     start.disabled = more.disabled = skip.disabled = locked || !rows.some((row) => row.input.value.trim());
     if (more.disabled) showOptions(false);
-    confirm.disabled = Boolean(job);
+    confirm.disabled = busy || Boolean(approval?.items.some((item) => item.needsEstimate));
     cancel.hidden = !job;
   }
 
@@ -806,16 +837,17 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
     message.textContent = text;
   }
 
-  function showEstimate(items, direct, excluded) {
-    approval = { items, direct, excluded };
+  function showEstimate(items, rejected, direct, excluded, folder) {
+    approval = { items, rejected, direct, excluded, folder };
     renderEstimateSummary();
-    confirm.textContent = items.length + "件の一括保存を開始";
   }
 
   function renderEstimateSummary() {
     const { items, excluded } = approval;
-    find("download-estimate-output").textContent = summarizeDownloadSize(items);
-    const unknown = items.filter((item) => !Number.isFinite(selectedDownloadEstimate(item)?.savedBytes)).length;
+    const pending = items.some((item) => item.needsEstimate);
+    confirm.textContent = items.length + "件の一括保存を開始";
+    find("download-estimate-output").textContent = pending ? "再確認が必要です" : summarizeDownloadSize(items);
+    const unknown = items.filter((item) => !item.needsEstimate && !Number.isFinite(selectedDownloadEstimate(item)?.savedBytes)).length;
     const notes = [];
     if (unknown) notes.push(unknown + "件の保存容量は変換後に確定します。");
     notes.push("必要に応じてタイトルやアーティスト名を編集してから保存してください。");
@@ -828,6 +860,86 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
     const { savedBytes } = selectedDownloadEstimate(item) ?? {};
     const saved = Number.isFinite(savedBytes) ? "約 " + displayDownloadSize(savedBytes) : "変換後に確定";
     setRowState(item.row, "", "保存容量 " + saved);
+  }
+
+  function readItemFormat(item) {
+    item.format = rowFormat(item.row);
+    item.quality = item.row.quality.value;
+  }
+
+  async function prepareItem(item, request, signal) {
+    const { row } = item;
+    if (!row.mediaKind && !item.sourceChecked) {
+      const response = await request("/api/downloads/info", {
+        method: "POST", body: { url: item.url }, expectedStatuses: [400, 404, 422, 429, 504],
+      });
+      if (response.ok) {
+        const info = await response.json().catch(() => null);
+        signal.throwIfAborted();
+        applyDownloadInfo(row, info);
+        updatePreview(row);
+        persistRows();
+      }
+      item.sourceChecked = true;
+    }
+    readItemFormat(item);
+  }
+
+  async function estimateItem(item, request, signal) {
+    try {
+      item.estimate = await estimateDownload(item, request);
+    } catch (error) {
+      if (error.cause !== "audio_only" || item.format !== "mp4") throw error;
+      setRowMediaKind(item.row, "audio");
+      readItemFormat(item);
+      persistRows();
+      item.estimate = await estimateDownload(item, request);
+    }
+    signal.throwIfAborted();
+    applyDownloadInfo(item.row, item.estimate);
+    persistRows();
+    showQualitySizes(item.row, item.estimate?.qualities);
+    renderEstimateRow(item);
+  }
+
+  function changeRowFormat(row) {
+    row.formatChosen = true;
+    setRowState(row);
+    showQualitySizes(row);
+    persistRows();
+    const review = approval;
+    const rejected = review?.rejected.get(row);
+    const item = review?.items.find((entry) => entry.row === row) ?? rejected;
+    if (!item) {
+      updateControls();
+      return;
+    }
+    const { direct } = review;
+    const starting = startPCHelper(direct);
+    readItemFormat(item);
+    item.estimate = null;
+    item.needsEstimate = true;
+    renderEstimateSummary();
+    setRowState(row, "", "容量を再確認しています…", true);
+    runTask(async (signal) => {
+      try {
+        const request = await requestFor(direct, signal, starting);
+        await estimateItem(item, request, signal);
+        item.needsEstimate = false;
+        if (rejected && approval === review) {
+          review.rejected.delete(row);
+          review.excluded--;
+          review.items.push(item);
+          review.items.sort((first, second) => rows.indexOf(first.row) - rows.indexOf(second.row));
+        }
+        message.textContent = "";
+      } catch (error) {
+        setRowState(row, "error", signal.aborted ? "容量の再確認を中止しました。" : error.message);
+        throw error;
+      } finally {
+        if (approval === review) renderEstimateSummary();
+      }
+    });
   }
 
   function rowBatch() {
@@ -844,7 +956,7 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
       }
       setRowState(row);
       showQualitySizes(row);
-      items.push({ row, url: rowMediaUrl(row, url.href), format: rowFormat(row), quality: row.quality.value, playlist: isYoutubePlaylist(url) });
+      items.push({ row, url: url.href, format: rowFormat(row), quality: row.quality.value, playlist: isYoutubePlaylist(url) });
     }
     return { items, excluded };
   }
@@ -908,15 +1020,18 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
         for (const id of new Set(ids)) {
           const entry = metadata.get(id);
           const videoId = typeof entry?.videoId === "string" && /^[\w-]{11}$/.test(entry.videoId) ? entry.videoId : null;
-          const trackFormat = !row.formatChosen && entry?.video === true ? "mp4" : format;
+          const mediaKind = entry?.kind ?? (entry?.video === true ? "video" : undefined);
+          const trackFormat = mediaKind === "audio" ? row.audioFormat.value
+            : !row.formatChosen && mediaKind === "video" ? "mp4" : format;
           const url = youtubeWatchUrl(videoId ?? id);
           const trackRow = appendRow(url, trackFormat, quality, row, {
             formatChosen: row.formatChosen,
-            albumTrackId: videoId ? id : undefined,
+            audioFormat: row.audioFormat.value,
+            mediaKind,
             info: { title: entry?.title },
           });
           playlistPreviewObserver?.observe(trackRow.element);
-          expanded.push({ row: trackRow, url: rowMediaUrl(trackRow, url), format: trackFormat, quality });
+          expanded.push({ row: trackRow, url, format: trackFormat, quality });
         }
         removeRow(row);
         numberRows();
@@ -931,24 +1046,22 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
     return { items: expanded, excluded };
   }
 
-  async function checkBatch(items, direct, excluded, request, signal) {
+  async function checkBatch(items, direct, excluded, request, signal, folder) {
     const eligible = [];
+    const rejected = new Map();
     for (const [index, item] of items.entries()) {
       signal.throwIfAborted();
       const { row } = item;
       showProgress((index + 1) + " / " + items.length + " 件を確認しています…", index / items.length * 100);
       setRowState(row, "", "曲情報と容量を確認中…", true);
       try {
-        item.estimate = await estimateDownload(item, request);
-        signal.throwIfAborted();
-        applyDownloadInfo(row, item.estimate);
-        persistRows();
-        if (item.format === "mp4") showQualitySizes(row, item.estimate?.qualities);
-        renderEstimateRow(item);
+        await prepareItem(item, request, signal);
+        await estimateItem(item, request, signal);
         eligible.push(item);
       } catch (error) {
         setRowState(row, "error", signal.aborted ? "容量確認を中止しました。" : error.message);
         if (signal.aborted || error instanceof DownloadConnectionError) throw error;
+        rejected.set(row, item);
         excluded++;
       }
     }
@@ -958,29 +1071,32 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
     }
     if (direct) pcConnectedAt = Date.now();
     message.textContent = "";
-    showEstimate(eligible, direct, excluded);
+    showEstimate(eligible, rejected, direct, excluded, folder);
   }
 
-  async function saveBatch(items, excluded, request, signal) {
+  async function saveBatch(items, excluded, request, signal, folder) {
     let saved = 0;
     let failed = excluded;
     for (const [index, item] of items.entries()) {
       signal.throwIfAborted();
-      const { row, format } = item;
+      const { row } = item;
       showProgress((index + 1) + " / " + items.length + " 件を処理しています…", index / items.length * 100);
       try {
+        await prepareItem(item, request, signal);
+        const { format } = item;
         updatePreview(row);
         const input = await downloadVideoPage(item, request, signal,
           (text, percent) => setRowState(row, "", text, true, percent));
+        applyDownloadInfo(row, input.info);
+        updatePreview(row);
         const cover = format === "mp4" ? await row.cover : await audioDownloadArtwork(item.url, row.cover, signal);
         signal.throwIfAborted();
-        setRowState(row, "", "ライブラリに保存しています…", true);
+        setRowState(row, "", folder ? "フォルダに保存しています…" : "ライブラリに保存しています…", true);
         cancel.disabled = close.disabled = true;
         const name = (input.name ?? "").replace(/\.[a-z0-9]{1,6}$/i, "")
           .replace(/[\\/:*?"<>|\p{Cc}]+/gu, " ").trim();
-        applyDownloadInfo(row, input.info);
         const edits = readMediaEdits(row.element);
-        await saveMedia(input.blob, (name.slice(0, 180) || "ダウンロード") + "." + format, format, cover, edits);
+        await saveMedia(input.blob, (name.slice(0, 180) || "ダウンロード") + "." + format, format, cover, edits, folder);
         saved++;
         removeRow(row);
         numberRows();
@@ -993,7 +1109,8 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
         cancel.disabled = close.disabled = false;
       }
     }
-    message.textContent = saved + "件を端末に保存しました。" + (failed ? "未保存 " + failed + "件" : "");
+    const place = folder ? "「" + folder.name + "」" : "端末";
+    message.textContent = saved + "件を" + place + "に保存しました。" + (failed ? "未保存 " + failed + "件" : "");
   }
 
   async function runTask(operation) {
@@ -1027,16 +1144,20 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
     }
   }
 
-  find("download-open").addEventListener("click", () => {
+  function openDownloads(folder = null) {
     if (dialog.open) return;
     find("add-dialog").close();
+    destination = folder;
+    destinationLabel.hidden = !folder;
+    destinationLabel.textContent = folder ? "保存先 「" + folder.name + "」" : "";
     if (!job) {
       message.textContent = "";
       for (const row of rows) updatePreview(row);
     }
     updateControls();
     dialog.showModal();
-  });
+  }
+  find("download-open").addEventListener("click", () => openDownloads());
   close.addEventListener("click", () => {
     job?.abort();
     approval = null;
@@ -1106,30 +1227,32 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
       return;
     }
     const direct = onWindows;
+    const folder = destination;
     const starting = startPCHelper(direct);
     runTask(async (signal) => {
       const request = await requestFor(direct, signal, starting);
       const batch = await expandPlaylists(items, excluded, request, signal);
       if (!batch.items.length) {
         message.textContent = "読み込める項目がありません。各行の表示を確認してください。";
-      } else if (skipEstimate) await saveBatch(batch.items, batch.excluded, request, signal);
-      else await checkBatch(batch.items, direct, batch.excluded, request, signal);
+      } else if (skipEstimate) await saveBatch(batch.items, batch.excluded, request, signal, folder);
+      else await checkBatch(batch.items, direct, batch.excluded, request, signal, folder);
     });
   }
   start.addEventListener("click", () => startBatch(false));
   skip.addEventListener("click", () => startBatch(true));
   confirm.addEventListener("click", () => {
-    if (!approval) return;
-    const { items, direct, excluded } = approval;
+    if (!approval || approval.items.some((item) => item.needsEstimate)) return;
+    const { items, direct, excluded, folder } = approval;
     approval = null;
     const starting = startPCHelper(direct);
     runTask(async (signal) => {
       const request = await requestFor(direct, signal, starting);
-      await saveBatch(items, excluded, request, signal);
+      await saveBatch(items, excluded, request, signal, folder);
     });
   });
 
   restoreRows();
   ensureBlankRow();
   updateControls();
+  return openDownloads;
 }

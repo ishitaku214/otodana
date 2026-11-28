@@ -10,13 +10,13 @@
   <link rel="icon" href="icon-192.png?v=40">
   <link rel="apple-touch-icon" href="icon-192.png?v=40">
   <link rel="manifest" href="manifest.webmanifest?v=40">
-  <link rel="stylesheet" href="style.css?v=52">
-  <script src="storage.js?v=50" defer></script>
+  <link rel="stylesheet" href="style.css?v=58">
+  <script src="storage.js?v=57" defer></script>
   <script src="artwork.js?v=50" defer></script>
-  <script src="queue.js?v=24" defer></script>
-  <script src="download.js?v=55" defer></script>
+  <script src="queue.js?v=56" defer></script>
+  <script src="download.js?v=58" defer></script>
   <script src="pc-transfer.js?v=56" defer></script>
-  <script src="app.js?v=56" defer></script>
+  <script src="app.js?v=57" defer></script>
 </head>
 <body data-view="library">
   <svg class="icon-definitions" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
@@ -52,7 +52,7 @@
         <button type="button" id="folder-back" hidden>‹ ライブラリ</button>
         <div class="library-title-row">
           <h1 id="library-title" tabindex="-1">ライブラリ</h1>
-          <span id="app-version" aria-label="バージョン56">v56</span>
+          <span id="app-version" aria-label="バージョン58">v58</span>
         </div>
         <div class="library-summary">
           <span id="track-count">0 曲</span>
@@ -60,6 +60,9 @@
           <div class="library-summary-tools">
             <button type="button" id="add-tracks" class="library-icon" aria-label="曲を追加" aria-haspopup="dialog" aria-controls="add-dialog">
               <svg class="ui-icon" aria-hidden="true"><use href="#icon-add-music"/></svg>
+            </button>
+            <button type="button" id="folder-download" class="library-icon" aria-label="このフォルダにダウンロード" aria-haspopup="dialog" aria-controls="download-dialog" hidden>
+              <svg class="ui-icon" aria-hidden="true"><use href="#icon-download"/></svg>
             </button>
             <button type="button" id="library-settings" class="library-icon" aria-label="ライブラリの設定" aria-haspopup="dialog" aria-controls="track-menu">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -75,7 +78,7 @@
           <span class="search-symbol" aria-hidden="true"></span>
           <input id="search" type="search" role="combobox" aria-autocomplete="list" aria-controls="search-suggestions" aria-expanded="false" placeholder="曲名・アーティスト・アルバムで検索" aria-label="曲名・アーティスト・アルバムで検索" autocomplete="off">
         </label>
-        <ul id="search-suggestions" role="listbox" aria-label="検索候補" hidden></ul>
+        <ul id="search-suggestions" class="suggestion-list" role="listbox" aria-label="検索候補" hidden></ul>
         <div id="folder-selection" class="dialog-actions" hidden>
           <button type="button" id="selection-cancel" class="action action-text">キャンセル</button>
           <button type="button" id="selection-confirm" class="action action-primary" value="confirm" disabled>確定</button>
@@ -234,11 +237,12 @@
     </div>
   </dialog>
 
-  <dialog id="download-dialog" class="folder-dialog" aria-labelledby="download-title">
+  <dialog id="download-dialog" class="folder-dialog" aria-labelledby="download-title" aria-describedby="download-destination">
     <div class="menu-heading">
       <h2 id="download-title">動画リンクから保存</h2>
       <button type="button" id="download-close" class="library-icon" aria-label="閉じる" autofocus><svg class="ui-icon" aria-hidden="true"><use href="#icon-close"/></svg></button>
     </div>
+    <p id="download-destination" class="feedback download-list-message" hidden></p>
     <div id="download-options">
       <div class="youtube-links">
         <a class="youtube-link" href="https://www.youtube.com/" target="_blank" rel="noopener" aria-label="YouTubeを開く">
@@ -274,12 +278,13 @@
               <label><input type="radio" value="mp4" checked><span>動画</span></label>
               <label><input type="radio" value="audio"><span>音声</span></label>
             </div>
+            <span class="download-audio-only" hidden>音声のみ</span>
             <div class="download-row-choice">
               <label><select class="download-quality">
-                <option value="best">最高（元の解像度）</option>
-                <option value="1080" selected>1080pまで</option>
-                <option value="720">720pまで</option>
-                <option value="480">480pまで</option>
+                <option value="best">オリジナル</option>
+                <option value="1080" selected>1080p</option>
+                <option value="720">720p</option>
+                <option value="480">480p</option>
               </select></label>
               <label hidden><select class="download-audio-format">
                 <option value="wav">元音質（WAV）</option>
@@ -412,9 +417,15 @@
     <form method="dialog" id="details-form" autocomplete="off">
       <label for="details-name">曲名</label><input id="details-name" type="text" maxlength="300">
       <label for="details-artist">アーティスト</label>
-      <div class="details-field"><input id="details-artist" type="text" maxlength="300" autocomplete="off" autocorrect="off" spellcheck="false"><select id="details-artist-choice" aria-label="フォルダ内のアーティストから選ぶ" hidden></select></div>
+      <div class="details-field">
+        <input id="details-artist" type="text" maxlength="300" autocomplete="off" autocorrect="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-controls="details-artist-suggestions" aria-expanded="false">
+        <ul id="details-artist-suggestions" class="suggestion-list" role="listbox" aria-label="アーティスト候補" hidden></ul>
+      </div>
       <label for="details-album">アルバム</label>
-      <div class="details-field"><input id="details-album" type="text" maxlength="300" autocomplete="off" autocorrect="off" spellcheck="false"><select id="details-album-choice" aria-label="フォルダ内のアルバムから選ぶ" hidden></select></div>
+      <div class="details-field">
+        <input id="details-album" type="text" maxlength="300" autocomplete="off" autocorrect="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-controls="details-album-suggestions" aria-expanded="false">
+        <ul id="details-album-suggestions" class="suggestion-list" role="listbox" aria-label="アルバム候補" hidden></ul>
+      </div>
       <dl class="details-stats">
         <dt>再生回数</dt><dd id="details-plays">0回</dd>
         <dt>最後に再生</dt><dd id="details-last">—</dd>

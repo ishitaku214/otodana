@@ -19,9 +19,11 @@ const trackStore = {
     });
   },
 
-  saveMedia(database, track, details) {
+  saveMedia(database, track, details, layoutForTrack) {
     return new Promise((resolve, reject) => {
-      const transaction = database.transaction(["tracks", "trackDetails"], "readwrite");
+      const stores = ["tracks", "trackDetails"];
+      if (layoutForTrack) stores.push("settings");
+      const transaction = database.transaction(stores, "readwrite");
       const tracks = transaction.objectStore("tracks");
       const trackDetails = transaction.objectStore("trackDetails");
       let id;
@@ -29,6 +31,7 @@ const trackStore = {
         request.onsuccess = () => {
           id = request.result;
           trackDetails.put({ ...details, id });
+          if (layoutForTrack) transaction.objectStore("settings").put(layoutForTrack(id), "library");
         };
       }
       if (track.blob) {
