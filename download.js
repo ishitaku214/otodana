@@ -501,7 +501,7 @@ function readDownloadCsv(text) {
   return { items, skipped };
 }
 
-function setupMediaDownloads(saveMedia, setScreenActivity) {
+function setupMediaDownloads(saveMedia, setScreenActivity, getDestination) {
   setupDownloadSettings(setScreenActivity);
   const find = (id) => document.getElementById(id);
   const dialog = find("download-dialog");
@@ -1157,7 +1157,7 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
     updateControls();
     dialog.showModal();
   }
-  find("download-open").addEventListener("click", () => openDownloads());
+  find("download-open").addEventListener("click", () => openDownloads(getDestination()));
   close.addEventListener("click", () => {
     job?.abort();
     approval = null;
@@ -1254,5 +1254,4 @@ function setupMediaDownloads(saveMedia, setScreenActivity) {
   restoreRows();
   ensureBlankRow();
   updateControls();
-  return openDownloads;
 }

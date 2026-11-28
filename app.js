@@ -18,6 +18,7 @@ const videoControls = document.querySelector(".player-controls");
 const playerContent = document.querySelector(".player-content");
 const fullscreenRoot = document.documentElement;
 const playerCover = get("player-cover");
+const playerStage = videoStage.parentElement;
 let media = audio;
 const mediaFormats = {
   mp3: "audio/mpeg",
@@ -31,9 +32,9 @@ const picker = get("file-picker");
 const importReview = get("import-review");
 const importReviewSave = get("import-review-save");
 const addTracks = get("add-tracks");
-const folderDownload = get("folder-download");
 const addDialog = get("add-dialog");
 const library = get("library");
+const libraryContent = get("library-content");
 const librarySearch = get("search").closest(".library-search");
 const list = get("tracks");
 const search = get("search");
@@ -107,7 +108,6 @@ const queue = new PlaybackQueue();
 const historyKey = "otodana-playback-history";
 const playbackKey = "otodana-playback-checkpoint";
 let database = null;
-let checkingStorage = true;
 let current = null;
 let objectUrl = null;
 let companionVideoUrl = null;
@@ -125,6 +125,7 @@ let folderDetailsDraft = null;
 let detailsCoverUrl = null;
 let searchRevision = 0;
 let searching = false;
+let libraryNavigation;
 let searchSuggestionsOpen = false;
 let recordedCurrent = false;
 let backdrop = null;
@@ -133,6 +134,8 @@ let pendingImport = null;
 let previewQueue = Promise.resolve();
 let saveToastTimer;
 let videoLayoutFrame = 0;
+let queueArtworkMotion;
+let queueVideoMotion;
 let miniVideoFrame = 0;
 let miniVideoTime = -Infinity;
 let activeLibraryButton = null;
@@ -644,7 +647,94 @@ const cancelQueueGesture = bindQueueGestures(queueList, () => queuePanel, {
   remove: removeQueued,
 }, reducedMotion);
 
-function showQueue(visible) {
+function animateQueueArtwork(from, visible) {
+  const slot = visible ? queueVideoSlot : playerCover;
+  const destination = slot.getBoundingClientRect();
+  const stage = playerStage.getBoundingClientRect();
+  if (!from.width || !destination.width || !stage.width) return;
+  const top = visible ? destination.top - queuePanel.getBoundingClientRect().top : destination.top - stage.top;
+  const width = Math.max(from.width, destination.width);
+  const height = Math.max(from.height, destination.height);
+  const overlay = document.createElement("span");
+  overlay.className = "queue-artwork-motion";
+  overlay.setAttribute("aria-hidden", "true");
+  if (!artwork.hidden) {
+    const image = new Image();
+    image.src = artwork.src;
+    image.alt = "";
+    overlay.append(image);
+  }
+  Object.assign(overlay.style, {
+    left: "0", top: "0", width: width + "px", height: height + "px",
+  });
+  playerStage.append(overlay);
+  playerStage.setAttribute("data-artwork-transition", "");
+  const position = (rect, y) => ({
+    transform: `translate(${rect.left - stage.left}px, ${y}px) scale(${rect.width / width}, ${rect.height / height})`,
+  });
+  const motion = overlay.animate([position(from, from.top - stage.top), position(destination, top)], {
+    duration: 290, easing: "cubic-bezier(.22,.8,.24,1)", fill: "both",
+  });
+  queueArtworkMotion = { overlay, motion };
+  motion.finished.then(() => {
+    if (queueArtworkMotion?.motion === motion) clearQueueArtworkMotion();
+  }, () => {});
+}
+
+function clearQueueArtworkMotion() {
+  if (!queueArtworkMotion) return;
+  queueArtworkMotion.motion.cancel();
+  queueArtworkMotion.overlay.remove();
+  queueArtworkMotion = null;
+  playerStage.removeAttribute("data-artwork-transition");
+}
+
+function videoFrameBounds(element, centered) {
+  const bounds = element.getBoundingClientRect();
+  if (!video.videoWidth || !video.videoHeight) return bounds;
+  const scale = Math.min(bounds.width / video.videoWidth, bounds.height / video.videoHeight);
+  const width = video.videoWidth * scale;
+  const height = video.videoHeight * scale;
+  return new DOMRect(bounds.left + (bounds.width - width) / 2,
+    bounds.top + (centered ? (bounds.height - height) / 2 : 0), width, height);
+}
+
+function clearQueueVideoMotion() {
+  if (!queueVideoMotion) return;
+  queueVideoMotion.cancel();
+  queueVideoMotion = null;
+  videoStage.removeAttribute("data-queue-motion");
+}
+
+function animateQueueVideo(from, visible) {
+  const to = videoFrameBounds(visible ? queueVideoSlot : videoSlot, visible);
+  if (!from.width || !from.height || !to.width || !to.height) return;
+  const stage = playerStage.getBoundingClientRect();
+  const position = (rect, radius) => ({
+    left: rect.left - stage.left + "px", top: rect.top - stage.top + "px",
+    width: rect.width + "px", height: rect.height + "px", borderRadius: radius,
+  });
+  videoStage.setAttribute("data-queue-motion", "");
+  const motion = videoStage.animate([
+    position(from, visible ? "0px" : "8px"), position(to, visible ? "8px" : "0px"),
+  ], { duration: 290, easing: "cubic-bezier(.22,.8,.24,1)", fill: "both" });
+  queueVideoMotion = motion;
+  motion.finished.then(() => {
+    if (queueVideoMotion !== motion) return;
+    clearQueueVideoMotion();
+    updateVideoLayout();
+  }, () => {});
+}
+
+function showQueue(visible, animate = false) {
+  const changing = animate && !reducedMotion.matches && player.dataset.queue !== String(visible);
+  const videoPlaying = isVideo(current);
+  const from = changing && !videoPlaying && current
+    ? (queueArtworkMotion?.overlay ?? (visible ? playerCover : queueVideoSlot)).getBoundingClientRect() : null;
+  const videoFrom = changing && videoPlaying && video.readyState >= 2 && !video.error && !media.ended
+    ? queueVideoMotion ? videoStage.getBoundingClientRect() : videoFrameBounds(video, !visible) : null;
+  clearQueueArtworkMotion();
+  clearQueueVideoMotion();
   player.dataset.queue = String(visible);
   queueToggle.setAttribute("aria-pressed", String(visible));
   queueToggle.setAttribute("aria-label", visible ? "ジャケット表示に戻る" : "次に再生する曲を表示");
@@ -658,6 +748,8 @@ function showQueue(visible) {
     queueThumbnailObserver?.disconnect();
   }
   scheduleVideoLayout();
+  if (from) animateQueueArtwork(from, visible);
+  if (videoFrom) animateQueueVideo(videoFrom, visible);
 }
 
 function updateSelection() {
@@ -787,6 +879,8 @@ function setBackdrop(image) {
 }
 
 function clearSource(nextIsVideo = false) {
+  clearQueueArtworkMotion();
+  clearQueueVideoMotion();
   ++playRequest;
   seekDrag = null;
   resumePosition = null;
@@ -1018,21 +1112,6 @@ function showSaveToast(saved, unit = "曲") {
   }, 5000);
 }
 
-function updateStorageSummary() {
-  const summary = get("storage-summary");
-  if (checkingStorage) return;
-  if (!database) {
-    summary.textContent = "端末保存を利用できません。";
-    return;
-  }
-  const saved = tracks.filter((track) => track.id !== undefined);
-  const bytes = saved.reduce((total, track) => total + track.blob.size, 0);
-  const amount = bytes >= 1_000_000 ? bytes / 1_000_000 : bytes / 1_000;
-  const unit = bytes === 0 || bytes >= 1_000_000 ? "MB" : "KB";
-  const formatted = new Intl.NumberFormat("ja", { maximumFractionDigits: 1 }).format(amount);
-  summary.textContent = "端末に保存済み " + saved.length + "曲[" + formatted + unit + "]";
-}
-
 function restoreHistory(savedTracks) {
   try {
     const ids = JSON.parse(localStorage.getItem(historyKey) || "[]");
@@ -1144,8 +1223,8 @@ async function restoreTracks() {
         const order = new Map(layout.order.map((id, index) => [id, index]));
         saved.sort((first, second) => (order.get(first.id) ?? Infinity) - (order.get(second.id) ?? Infinity) || first.id - second.id);
         customTrackOrder = order.size > 0;
-        for (const { name, ids, cover } of layout.folders) {
-          const folder = { name, cover, tracks: [] };
+        for (const { name, ids, cover, pcTransferId } of layout.folders) {
+          const folder = { name, cover, pcTransferId, tracks: [] };
           for (const id of ids) {
             const track = savedById.get(id);
             if (!track || track.folder) continue;
@@ -1166,22 +1245,28 @@ async function restoreTracks() {
   } catch (error) {
     console.warn("保存した曲を読み込めませんでした。", error);
   } finally {
-    checkingStorage = false;
     filterLibrary();
   }
 }
 
-function libraryLayout(folderEdit, addedTrack) {
-  const savedIds = (entries) => entries.flatMap((track) => track.id === undefined ? [] : [track.id]);
+function libraryLayout(folderEdit, addedTrack, addedId, destination = addedTrack?.folder) {
+  const savedIds = (entries) => entries.flatMap((track) => {
+    const id = track === addedTrack ? addedId : track.id;
+    return id === undefined ? [] : [id];
+  });
   const order = customTrackOrder ? savedIds(tracks) : [];
-  if (customTrackOrder && addedTrack) order.push(addedTrack.id);
+  if (customTrackOrder && addedTrack && !tracks.includes(addedTrack)) order.push(addedId);
+  const entries = folderEdit && !folders.includes(folderEdit.folder) ? [...folders, folderEdit.folder] : folders;
   return {
     order,
-    folders: folders.map((folder) => {
-      const { name, cover } = folderEdit?.folder === folder ? folderEdit : folder;
-      const ids = savedIds(folder.tracks);
-      if (addedTrack?.folder === folder) ids.push(addedTrack.id);
-      return { name, ids, ...(cover && { cover }) };
+    folders: entries.map((folder) => {
+      const edit = folderEdit?.folder === folder ? folderEdit : null;
+      const { name, cover } = edit ?? folder;
+      const pcTransferId = edit?.pcTransferId ?? folder.pcTransferId;
+      const members = edit?.tracks ?? folder.tracks;
+      const ids = savedIds(addedTrack && folder !== destination ? members.filter((track) => track !== addedTrack) : members);
+      if (addedTrack && destination === folder && !members.includes(addedTrack)) ids.push(addedId);
+      return { name, ids, ...(cover && { cover }), ...(pcTransferId && { pcTransferId }) };
     }),
   };
 }
@@ -1209,7 +1294,7 @@ async function saveTrack(track) {
   trackFeedback(track, "「" + trackTitle(track) + "」を端末に保存しています…");
   try {
     await persistTrack(track);
-    if (customTrackOrder || track.folder) persistLibrary();
+    if (customTrackOrder && !track.folder) persistLibrary();
     trackFeedback(track, "「" + trackTitle(track) + "」を端末に保存しました。");
   } catch (error) {
     trackFeedback(track, error?.name === "QuotaExceededError"
@@ -1221,10 +1306,11 @@ async function saveTrack(track) {
   }
 }
 
-async function persistTrack(track, layoutForTrack) {
+async function persistTrack(track) {
   const { blob, title, filename, addedAt, format, sourceCover } = track;
   const entry = { blob, title, filename, addedAt, format, ...(sourceCover && { sourceCover }) };
   const { edits, plays, lastPlayed, videoThumbnail, metadata, durationSeconds } = track;
+  const layoutForTrack = track.folder ? (id) => libraryLayout(null, track, id) : undefined;
   track.id = layoutForTrack || edits || plays || videoThumbnail || metadata || durationSeconds
     ? await trackStore.saveMedia(database, entry, { edits, plays, lastPlayed, videoThumbnail, metadata, durationSeconds }, layoutForTrack)
     : await trackStore.run(database, "readwrite", (store) => store.add(entry));
@@ -1238,7 +1324,7 @@ async function saveDownloadedMedia(blob, filename, format, sourceCover, edits, f
   const title = filename.slice(0, -(format.length + 1));
   const track = { blob, title, filename, format, addedAt: Date.now(), sourceCover, edits, folder };
   try {
-    await persistTrack(track, folder ? (id) => libraryLayout(null, { id, folder }) : undefined);
+    await persistTrack(track);
   } catch (error) {
     throw new Error(error?.name === "QuotaExceededError"
       ? "端末の空き容量が足りません。空き容量を増やしてお試しください。"
@@ -1258,7 +1344,7 @@ function addSavedMediaToLibrary(track) {
   filterLibrary();
 }
 
-async function savePCTrack({ blob, title, filename, format, pcTransferId, addedAt, sourceCover, edits, metadata, plays, lastPlayed, videoThumbnail }) {
+async function savePCTrack({ blob, title, filename, format, pcTransferId, addedAt, sourceCover, edits, metadata, plays, lastPlayed, videoThumbnail, durationSeconds }, folder) {
   await storageReady;
   if (!database) throw new Error("このブラウザでは端末保存を利用できません。");
   const existing = blob ? null : tracks.find((track) => track.pcTransferId === pcTransferId);
@@ -1267,10 +1353,12 @@ async function savePCTrack({ blob, title, filename, format, pcTransferId, addedA
     await existing.videoThumbnailRequest;
   }
   const entry = { ...(blob && { blob }), title, filename, format, pcTransferId, addedAt: addedAt ?? Date.now(), sourceCover };
-  const details = { edits, metadata, plays, lastPlayed, videoThumbnail };
+  const details = { edits, metadata, plays, lastPlayed, videoThumbnail, durationSeconds };
+  const track = existing ?? { ...entry, ...details, folder };
+  const layoutForTrack = folder ? (id) => libraryLayout(null, track, id, folder) : undefined;
   let id;
   try {
-    id = await trackStore.saveMedia(database, entry, details);
+    id = await trackStore.saveMedia(database, entry, details, layoutForTrack);
   } catch (error) {
     if (error?.name === "ConstraintError") return false;
     throw new Error(error?.name === "QuotaExceededError"
@@ -1279,8 +1367,10 @@ async function savePCTrack({ blob, title, filename, format, pcTransferId, addedA
   }
   if (id === undefined) throw new Error("同期中に受け取り先の曲が削除されました。もう一度送信してください。");
   if (blob) {
-    addSavedMediaToLibrary({ ...entry, ...details, id });
+    track.id = id;
+    addSavedMediaToLibrary(track);
   } else if (existing && tracks.includes(existing)) {
+    if (folder && existing.folder !== folder) moveIntoFolder([existing], folder, false);
     if (existing.thumbnail) URL.revokeObjectURL(existing.thumbnail);
     Object.assign(existing, entry, details, { thumbnail: null, videoThumbnailRequest: null });
     existing.preview = loadTrackPreview(existing);
@@ -1293,6 +1383,38 @@ async function savePCTrack({ blob, title, filename, format, pcTransferId, addedA
     }
   }
   return true;
+}
+
+async function savePCFolder({ name, cover, pcTransferId }) {
+  await storageReady;
+  if (!database) throw new Error("このブラウザでは端末保存を利用できません。");
+  const existing = folders.find((folder) => folder.pcTransferId === pcTransferId);
+  const folder = existing ?? { tracks: [] };
+  await writeLibraryLayout({ folder, name, cover, pcTransferId });
+  if (folder.coverUrl && folder.cover !== cover) {
+    URL.revokeObjectURL(folder.coverUrl);
+    folder.coverUrl = null;
+  }
+  Object.assign(folder, { name, cover, pcTransferId });
+  if (!existing) folders.push(folder);
+  if (activeFolder === folder) get("library-title").textContent = name;
+  renderTracks();
+  return folder;
+}
+
+async function orderPCFolder(folder, ids) {
+  const byId = new Map(folder.tracks.map((track) => [track.pcTransferId, track]));
+  const ordered = new Set(ids.map((id) => byId.get(id)).filter(Boolean));
+  const tracks = Array.from(new Set([...ordered, ...folder.tracks]));
+  if (tracks.every((track, index) => track === folder.tracks[index])) return;
+  await writeLibraryLayout({ folder, name: folder.name, cover: folder.cover, tracks });
+  folder.tracks = tracks;
+  if (playbackFolder === folder && current) {
+    const scope = matchingTracks(tracks, playbackQuery);
+    if (queue.shuffled) queue.updateScope(scope);
+    else queue.start(scope, current);
+  }
+  renderTracks();
 }
 
 async function saveImportedTracks(added, invalid) {
@@ -1312,7 +1434,7 @@ async function saveImportedTracks(added, invalid) {
     }
     // On quota failure, a smaller file in the same batch can still fit.
   }
-  if (saved && (customTrackOrder || folders.length)) persistLibrary();
+  if (saved && customTrackOrder && added.some((track) => !track.folder)) persistLibrary();
   renderTracks();
   const failed = added.length - saved;
   const message = [
@@ -1400,7 +1522,7 @@ function editedTracksFor(track) {
 function clearEditedTracks(entries) {
   if (!editSelection) return;
   for (const track of entries) editSelection.chosen.delete(track);
-  if (!editSelection.chosen.has(editSelection.anchor)) editSelection.anchor = null;
+  if (entries.includes(editSelection.anchor)) editSelection.anchor = null;
 }
 
 function showTrackMenuActions(...ids) {
@@ -1802,7 +1924,7 @@ function selectionRange(entries, anchor, target) {
   return entries.slice(Math.min(first, last), Math.max(first, last) + 1);
 }
 
-function moveIntoFolder(entries, folder) {
+function moveIntoFolder(entries, folder, saveLayout = true) {
   for (const track of entries) {
     if (track.folder) track.folder.tracks = track.folder.tracks.filter((entry) => entry !== track);
     track.folder = folder;
@@ -1820,10 +1942,12 @@ function moveIntoFolder(entries, folder) {
       queue.updateScope(playbackQuery ? available.filter((track) => queue.scope.includes(track)) : available);
     }
   }
-  return persistLibrary();
+  if (saveLayout) return persistLibrary();
 }
 
 function showFolder(folder) {
+  if (folder === activeFolder) return;
+  libraryNavigation?.cancel();
   activeFolder = folder;
   if (deleting) setDeleteMode(false);
   get("library-title").textContent = folder?.name ?? "ライブラリ";
@@ -1834,6 +1958,12 @@ function showFolder(folder) {
   search.value = "";
   tellLibrary("");
   filterLibrary();
+  if (!reducedMotion.matches) {
+    libraryNavigation = libraryContent.animate([
+      { transform: `translateX(${folder ? 32 : -24}px)`, opacity: .45 },
+      { transform: "translateX(0)", opacity: 1 },
+    ], { duration: 260, easing: "cubic-bezier(.22,.8,.24,1)" });
+  }
 }
 
 function openFolderMenu(folder) {
@@ -1999,7 +2129,10 @@ function renderFolders(query) {
     more.textContent = "•••";
     more.setAttribute("aria-label", folder.name + "の操作");
     more.addEventListener("click", () => openFolderMenu(folder));
-    row.append(open, libraryMediaSize(folderSize(folder)), more);
+    const actions = document.createElement("div");
+    actions.className = "folder-actions";
+    actions.append(more, libraryMediaSize(folderSize(folder)));
+    row.append(open, actions);
     folderList.append(row);
     const thumbnail = open.querySelector(".folder-icon");
     const first = folder.tracks[0];
@@ -2039,7 +2172,9 @@ function setTrackSelection(mode, folder = activeFolder) {
 function updateSelectionRow(row) {
   const button = row.querySelector(".track-select");
   const selection = trackSelection ?? editSelection;
-  if (selection) button.setAttribute("aria-pressed", String(selection.chosen.has(row.track)));
+  const selected = Boolean(selection?.chosen.has(row.track));
+  row.toggleAttribute("data-selected", selected);
+  if (selection) button.setAttribute("aria-pressed", String(selected));
   else button.removeAttribute("aria-pressed");
 }
 
@@ -2051,9 +2186,7 @@ function renderTracks() {
   deleteMode.hidden = librarySettings.hidden = Boolean(trackSelection);
   librarySettings.setAttribute("aria-label", activeFolder ? "フォルダの設定" : "ライブラリの設定");
   get("folder-back").hidden = !activeFolder || Boolean(trackSelection);
-  get("storage-summary").hidden = Boolean(activeFolder);
-  addTracks.hidden = Boolean(activeFolder || trackSelection);
-  folderDownload.hidden = !activeFolder || Boolean(trackSelection);
+  addTracks.hidden = Boolean(trackSelection);
   list.replaceChildren();
   const query = search.value.trim().normalize("NFKC").toLocaleLowerCase("ja");
   renderFolders(query);
@@ -2079,9 +2212,11 @@ function renderTracks() {
         const visibleRows = event.shiftKey && anchor ? Array.from(list.children) : [];
         const range = selectionRange(visibleRows, visibleRows.find((item) => item.track === anchor), row);
         if (range.length) {
+          const selecting = selection !== editSelection || chosen.has(anchor);
           for (const item of range) {
             if (skipBusy && item.track.busy) continue;
-            chosen.add(item.track);
+            if (selecting) chosen.add(item.track);
+            else chosen.delete(item.track);
             updateSelectionRow(item);
           }
         } else {
@@ -2107,8 +2242,8 @@ function renderTracks() {
     handle.innerHTML = '<span class="queue-symbol" aria-hidden="true"></span>';
     const actions = document.createElement("div");
     actions.className = "track-actions";
-    actions.append(more, handle);
-    row.append(select, libraryMediaSize(track.blob.size), actions);
+    actions.append(more, handle, libraryMediaSize(track.blob.size));
+    row.append(select, actions);
     updateSelectionRow(row);
     updateTrackRow(row);
     list.append(row);
@@ -2119,10 +2254,17 @@ function renderTracks() {
   get("empty-title").textContent = searching ? "曲を検索しています…" : query ? "該当する曲がありません" : "曲がありません";
   get("empty-help").textContent = searching ? "" : query
     ? "別の曲名やアーティスト名で探してください。"
-    : activeFolder ? "歯車の隣のダウンロードボタンから曲を追加できます。" : "「♪」からiCloud Driveなどの音楽や動画を追加できます。";
+    : activeFolder ? "「♪」からこのフォルダに曲を追加できます。" : "「♪」からiCloud Driveなどの音楽や動画を追加できます。";
   get("track-count").textContent = query ? matches.length + " / " + libraryTracks.length + " 曲" : libraryTracks.length + " 曲";
+  const storageSummary = get("storage-summary");
+  storageSummary.hidden = Boolean(activeFolder) || !database;
+  if (!storageSummary.hidden) {
+    const saved = tracks.filter((track) => track.id !== undefined);
+    const bytes = saved.reduce((total, track) => total + track.blob.size, 0);
+    const capacity = bytes ? displayDownloadSize(bytes).replace(" ", "") : "0MB";
+    storageSummary.textContent = saved.length + "曲[" + capacity + "]";
+  }
   renderSearchSuggestions();
-  updateStorageSummary();
   updateSelection();
 }
 
@@ -2143,6 +2285,7 @@ async function filterLibrary() {
 
 addTracks.addEventListener("click", () => addDialog.showModal());
 picker.addEventListener("change", async () => {
+  const folder = activeFolder;
   addDialog.close();
   const added = [];
   let invalid = 0;
@@ -2154,7 +2297,7 @@ picker.addEventListener("change", async () => {
       continue;
     }
     const title = file.name.slice(0, extension.index).trim() || file.name;
-    added.push({ blob: file.slice(0, file.size, mediaFormats[format]), title, filename: file.name, addedAt: Date.now(), format });
+    added.push({ blob: file.slice(0, file.size, mediaFormats[format]), title, filename: file.name, addedAt: Date.now(), format, folder });
   }
   picker.value = "";
   if (!added.length) {
@@ -2257,7 +2400,9 @@ importReviewSave.addEventListener("click", () => {
   }
   importReview.close();
   tracks.push(...added);
-  if (current && !playbackFolder && !playbackQuery) queue.append(added);
+  const { folder } = added[0];
+  folder?.tracks.push(...added);
+  if (current && folder === playbackFolder && !playbackQuery) queue.append(added);
   search.value = "";
   filterLibrary();
   tellLibrary(added.length + "曲を端末に保存しています…");
@@ -2288,8 +2433,47 @@ function folderAtPointer(event) {
   });
 }
 
+function libraryReorderTarget(track, target) {
+  if (!deleting || !list.children[target]) return null;
+  const entries = editedTracksFor(track);
+  if (!entries.length || entries.some((item) => item.busy)) return null;
+  const rows = Array.from(list.children);
+  const from = rows.findIndex((row) => row.track === track);
+  if (from < 0) return null;
+  const direction = Math.sign(target - from);
+  const moving = new Set(entries);
+  while (target !== from && moving.has(rows[target].track)) target -= direction;
+  return target === from ? null : { entries, neighbor: rows[target], direction, moving, rows };
+}
+
+let libraryInsertLine = null;
+
+function showLibraryInsertLine(edge) {
+  if (edge === libraryInsertLine?.edge) return;
+  if (libraryInsertLine) {
+    const { element, appearance } = libraryInsertLine;
+    if (reducedMotion.matches) element.remove();
+    else {
+      const opacity = getComputedStyle(element).opacity;
+      appearance?.cancel();
+      element.animate([{ opacity }, { opacity: 0 }], { duration: 125, easing: "ease-out", fill: "forwards" })
+        .finished.then(() => element.remove(), () => element.remove());
+    }
+    libraryInsertLine = null;
+  }
+  if (edge === undefined) return;
+  const element = document.createElement("span");
+  element.className = "library-insert-line";
+  element.style.top = edge + "px";
+  get("library-insert-lines").append(element);
+  const appearance = reducedMotion.matches ? null
+    : element.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 125, easing: "ease-out" });
+  libraryInsertLine = { element, appearance, edge };
+}
+
 const cancelLibraryGesture = bindQueueGestures(list, libraryScrollArea, {
   group: editedTracksFor,
+  shiftNeighbors: false,
   scrollDrag({ clientY }) {
     const topEdge = librarySearch.getBoundingClientRect().bottom + 24;
     const bottom = mobile.matches && !miniPlayer.hidden ? miniPlayer.getBoundingClientRect().top : window.innerHeight;
@@ -2302,6 +2486,32 @@ const cancelLibraryGesture = bindQueueGestures(list, libraryScrollArea, {
     const destination = folderAtPointer(event);
     for (const row of folderList.children) row.toggleAttribute("data-drop-target", row === destination);
   },
+  previewReorder(track, target, event, offset) {
+    const insertion = track && !folderAtPointer(event) ? libraryReorderTarget(track, target) : null;
+    if (!insertion) {
+      showLibraryInsertLine();
+      return;
+    }
+    const { neighbor, direction, moving, rows } = insertion;
+    const remaining = rows.filter((row) => !moving.has(row.track));
+    const next = remaining[remaining.indexOf(neighbor) + Number(direction > 0)];
+    const first = rows[0];
+    const last = rows.at(-1);
+    if (next && next !== remaining[0]) {
+      showLibraryInsertLine(next.offsetTop + next.clientTop);
+      return;
+    }
+    const movedRows = rows.filter((row) => moving.has(row.track));
+    if (next) {
+      showLibraryInsertLine(first.offsetTop);
+      return Math.max(offset, first.offsetTop - movedRows[0].offsetTop);
+    }
+    // The list reserves a gutter immediately below its last row.
+    const bottom = last.offsetTop + last.offsetHeight;
+    showLibraryInsertLine(list.clientHeight);
+    const movedLast = movedRows.at(-1);
+    return Math.min(offset, bottom - movedLast.offsetTop - movedLast.offsetHeight);
+  },
   drop(track, event) {
     if (activeFolder) return false;
     if (track.folder) return true;
@@ -2313,17 +2523,9 @@ const cancelLibraryGesture = bindQueueGestures(list, libraryScrollArea, {
     return true;
   },
   reorder(track, target) {
-    if (!deleting || !list.children[target]) return;
-    const entries = editedTracksFor(track);
-    if (!entries.length || entries.some((item) => item.busy)) return;
-    const rows = Array.from(list.children);
-    const from = rows.findIndex((entry) => entry.track === track);
-    if (from < 0) return;
-    const direction = Math.sign(target - from);
-    const moving = new Set(entries);
-    while (target !== from && moving.has(rows[target].track)) target -= direction;
-    if (target === from) return;
-    const neighbor = rows[target];
+    const insertion = libraryReorderTarget(track, target);
+    if (!insertion) return;
+    const { entries, neighbor, direction, moving, rows } = insertion;
     const order = activeFolder?.tracks ?? tracks;
     for (let index = order.length - 1; index >= 0; index--) {
       if (moving.has(order[index])) order.splice(index, 1);
@@ -2434,9 +2636,9 @@ deleteDialog.addEventListener("close", async () => {
 get("library-tab").addEventListener("click", () => showView("library"));
 get("player-tab").addEventListener("click", () => showView("player"));
 mobile.addEventListener("change", syncLayout);
-queueToggle.addEventListener("click", () => showQueue(player.dataset.queue !== "true"));
+queueToggle.addEventListener("click", () => showQueue(player.dataset.queue !== "true", true));
 queueCurrent.addEventListener("click", () => {
-  showQueue(false);
+  showQueue(false, true);
   queueToggle.focus({ preventScroll: true });
 });
 shuffleToggle.addEventListener("click", () => {
@@ -2977,6 +3179,10 @@ function updateVideoLayout() {
   })) {
     videoStage.style.setProperty("--video-" + key, value + "px");
   }
+  // Inline video is top-aligned inside a slot that can be taller than the frame.
+  const { videoWidth, videoHeight } = video;
+  const frameHeight = videoWidth && videoHeight ? Math.min(target.height, target.width * videoHeight / videoWidth) : target.height;
+  videoStage.style.setProperty("--video-skip-bottom", Math.max(0, target.height - frameHeight) + "px");
 }
 
 if (typeof ResizeObserver === "function") {
@@ -2984,6 +3190,8 @@ if (typeof ResizeObserver === "function") {
   for (const target of [videoStage.parentElement, videoSlot, queueVideoSlot, videoControls]) videoResize.observe(target);
 }
 window.addEventListener("resize", () => {
+  clearQueueArtworkMotion();
+  clearQueueVideoMotion();
   updateQueueViewport();
   scheduleVideoLayout();
 });
@@ -3065,7 +3273,7 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("fullscreenchange", () => {
   if (document.fullscreenElement !== fullscreenRoot && document.body.hasAttribute("data-video-expanded")) setVideoExpanded(false);
 });
-for (const event of ["loadedmetadata", "loadeddata", "seeked", "emptied"]) {
+for (const event of ["loadedmetadata", "loadeddata", "resize", "seeked", "emptied"]) {
   video.addEventListener(event, () => {
     updateVideoTools();
     scheduleVideoLayout();
@@ -3199,16 +3407,13 @@ if (!desktopPlayback && navigator.audioSession) {
 window.addEventListener("pagehide", () => rememberPlayback());
 syncLayout();
 const storageReady = restoreTracks();
-const openMediaDownloads = setupMediaDownloads(saveDownloadedMedia, setScreenActivity);
-folderDownload.addEventListener("click", () => {
-  if (activeFolder) openMediaDownloads(activeFolder);
-});
+setupMediaDownloads(saveDownloadedMedia, setScreenActivity, () => activeFolder);
 setupPCTransfer({
   async getLibrary() {
     await storageReady;
     return {
       root: rootTracks(),
-      folders: folders.map((folder) => ({ name: folder.name, tracks: [...folder.tracks] })),
+      folders: folders.map((folder) => ({ name: folder.name, tracks: [...folder.tracks], cover: folder.cover, source: folder })),
     };
   },
   async hasTrack(pcTransferId) {
@@ -3217,6 +3422,15 @@ setupPCTransfer({
     return (await trackStore.run(database, "readonly", (store) => store.index("pcTransferId").getKey(pcTransferId))) !== undefined;
   },
   saveTrack: savePCTrack,
+  saveFolder: savePCFolder,
+  orderFolder: orderPCFolder,
+  async prepareFolders(entries) {
+    for (const entry of entries) {
+      entry.source.pcTransferId ??= crypto.randomUUID();
+      entry.pcTransferId = entry.source.pcTransferId;
+    }
+    await writeLibraryLayout();
+  },
   selectionRange,
   displayTitle: trackTitle,
   displayArtist: trackArtist,

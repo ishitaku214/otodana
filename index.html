@@ -10,13 +10,13 @@
   <link rel="icon" href="icon-192.png?v=40">
   <link rel="apple-touch-icon" href="icon-192.png?v=40">
   <link rel="manifest" href="manifest.webmanifest?v=40">
-  <link rel="stylesheet" href="style.css?v=58">
+  <link rel="stylesheet" href="style.css?v=67">
   <script src="storage.js?v=57" defer></script>
   <script src="artwork.js?v=50" defer></script>
-  <script src="queue.js?v=56" defer></script>
-  <script src="download.js?v=58" defer></script>
-  <script src="pc-transfer.js?v=56" defer></script>
-  <script src="app.js?v=57" defer></script>
+  <script src="queue.js?v=67" defer></script>
+  <script src="download.js?v=59" defer></script>
+  <script src="pc-transfer.js?v=61" defer></script>
+  <script src="app.js?v=67" defer></script>
 </head>
 <body data-view="library">
   <svg class="icon-definitions" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
@@ -48,63 +48,65 @@
   </svg>
   <main class="layout">
     <section id="library" aria-labelledby="library-title">
-      <div class="library-heading">
-        <button type="button" id="folder-back" hidden>‹ ライブラリ</button>
-        <div class="library-title-row">
-          <h1 id="library-title" tabindex="-1">ライブラリ</h1>
-          <span id="app-version" aria-label="バージョン58">v58</span>
+      <div id="library-content">
+        <div class="library-heading">
+          <button type="button" id="folder-back" hidden>‹ ライブラリ</button>
+          <div class="library-title-row">
+            <h1 id="library-title" tabindex="-1">ライブラリ</h1>
+            <span id="app-version" aria-label="バージョン67">v67</span>
+          </div>
+          <div class="library-summary">
+            <span id="track-count">0 曲</span>
+            <span id="storage-summary" hidden></span>
+            <div class="library-summary-tools">
+              <button type="button" id="add-tracks" class="library-icon" aria-label="曲を追加" aria-haspopup="dialog" aria-controls="add-dialog">
+                <svg class="ui-icon" aria-hidden="true"><use href="#icon-add-music"/></svg>
+              </button>
+              <button type="button" id="library-settings" class="library-icon" aria-label="ライブラリの設定" aria-haspopup="dialog" aria-controls="track-menu">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="m10 3-.5 2.2-1.6.9-2.2-.7-2 3.4 1.7 1.6v1.8l-1.7 1.6 2 3.5 2.2-.7 1.6.9.5 2.3h4l.5-2.3 1.6-.9 2.2.7 2-3.5-1.7-1.6v-1.8l1.7-1.6-2-3.4-2.2.7-1.6-.9L14 3Z"/><circle cx="12" cy="11.4" r="3.1"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <h2 id="selection-title" hidden></h2>
         </div>
-        <div class="library-summary">
-          <span id="track-count">0 曲</span>
-          <span id="storage-summary">保存した曲を確認しています…</span>
-          <div class="library-summary-tools">
-            <button type="button" id="add-tracks" class="library-icon" aria-label="曲を追加" aria-haspopup="dialog" aria-controls="add-dialog">
-              <svg class="ui-icon" aria-hidden="true"><use href="#icon-add-music"/></svg>
+        <div class="library-search">
+          <label class="search">
+            <span class="search-symbol" aria-hidden="true"></span>
+            <input id="search" type="search" role="combobox" aria-autocomplete="list" aria-controls="search-suggestions" aria-expanded="false" placeholder="曲名・アーティスト・アルバムで検索" aria-label="曲名・アーティスト・アルバムで検索" autocomplete="off">
+          </label>
+          <ul id="search-suggestions" class="suggestion-list" role="listbox" aria-label="検索候補" hidden></ul>
+          <div id="folder-selection" class="dialog-actions" hidden>
+            <button type="button" id="selection-cancel" class="action action-text">キャンセル</button>
+            <button type="button" id="selection-confirm" class="action action-primary" value="confirm" disabled>確定</button>
+          </div>
+          <div class="library-actions">
+            <p id="library-message" class="feedback" role="status"></p>
+            <button type="button" id="new-folder" class="library-icon" aria-label="フォルダを作成" disabled>
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M4 5h5.4c.6 0 1.2.2 1.6.6L12.5 7H20a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Zm8 4.5a.9.9 0 0 0-.9.9v2.2H9a.9.9 0 0 0 0 1.8h2.1v2.2a.9.9 0 0 0 1.8 0v-2.2H15a.9.9 0 0 0 0-1.8h-2.1v-2.2a.9.9 0 0 0-.9-.9Z"/>
+              </svg>
             </button>
-            <button type="button" id="folder-download" class="library-icon" aria-label="このフォルダにダウンロード" aria-haspopup="dialog" aria-controls="download-dialog" hidden>
-              <svg class="ui-icon" aria-hidden="true"><use href="#icon-download"/></svg>
-            </button>
-            <button type="button" id="library-settings" class="library-icon" aria-label="ライブラリの設定" aria-haspopup="dialog" aria-controls="track-menu">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="m10 3-.5 2.2-1.6.9-2.2-.7-2 3.4 1.7 1.6v1.8l-1.7 1.6 2 3.5 2.2-.7 1.6.9.5 2.3h4l.5-2.3 1.6-.9 2.2.7 2-3.5-1.7-1.6v-1.8l1.7-1.6-2-3.4-2.2.7-1.6-.9L14 3Z"/><circle cx="12" cy="11.4" r="3.1"/>
+            <button type="button" id="delete-mode" class="library-icon" aria-label="曲を編集" aria-pressed="false" disabled>
+              <svg class="ui-icon edit-pencil" aria-hidden="true"><use href="#icon-pencil"/></svg>
+              <svg class="edit-done" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m5 12 4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
             </button>
           </div>
         </div>
-        <h2 id="selection-title" hidden></h2>
-      </div>
-      <div class="library-search">
-        <label class="search">
-          <span class="search-symbol" aria-hidden="true"></span>
-          <input id="search" type="search" role="combobox" aria-autocomplete="list" aria-controls="search-suggestions" aria-expanded="false" placeholder="曲名・アーティスト・アルバムで検索" aria-label="曲名・アーティスト・アルバムで検索" autocomplete="off">
-        </label>
-        <ul id="search-suggestions" class="suggestion-list" role="listbox" aria-label="検索候補" hidden></ul>
-        <div id="folder-selection" class="dialog-actions" hidden>
-          <button type="button" id="selection-cancel" class="action action-text">キャンセル</button>
-          <button type="button" id="selection-confirm" class="action action-primary" value="confirm" disabled>確定</button>
+        <ul id="folders" class="tracks" aria-label="フォルダ"></ul>
+        <div id="empty-library" class="empty">
+          <span class="empty-art thumb" aria-hidden="true"></span>
+          <h2 id="empty-title">曲がありません</h2>
+          <p id="empty-help">「♪」からiCloud Driveなどの音楽や動画を追加できます。</p>
         </div>
-        <div class="library-actions">
-          <button type="button" id="new-folder" class="library-icon" aria-label="フォルダを作成" disabled>
-            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <path fill-rule="evenodd" d="M4 5h5.4c.6 0 1.2.2 1.6.6L12.5 7H20a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Zm8 4.5a.9.9 0 0 0-.9.9v2.2H9a.9.9 0 0 0 0 1.8h2.1v2.2a.9.9 0 0 0 1.8 0v-2.2H15a.9.9 0 0 0 0-1.8h-2.1v-2.2a.9.9 0 0 0-.9-.9Z"/>
-            </svg>
-          </button>
-          <button type="button" id="delete-mode" class="library-icon" aria-label="曲を編集" aria-pressed="false" disabled>
-            <svg class="ui-icon edit-pencil" aria-hidden="true"><use href="#icon-pencil"/></svg>
-            <svg class="edit-done" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m5 12 4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </button>
+        <div class="library-track-area">
+          <ol id="tracks" class="tracks" aria-label="取り込んだ曲"></ol>
+          <div id="library-insert-lines" aria-hidden="true"></div>
         </div>
       </div>
-      <p id="library-message" class="feedback" role="status"></p>
-      <ul id="folders" class="tracks" aria-label="フォルダ"></ul>
-      <div id="empty-library" class="empty">
-        <span class="empty-art thumb" aria-hidden="true"></span>
-        <h2 id="empty-title">曲がありません</h2>
-        <p id="empty-help">「♪」からiCloud Driveなどの音楽や動画を追加できます。</p>
-      </div>
-      <ol id="tracks" class="tracks" aria-label="取り込んだ曲"></ol>
     </section>
 
     <section id="player" aria-label="再生画面">
@@ -343,7 +345,7 @@
         <p class="feedback">転送が終わるまで、両方の端末でこの画面を開いてください。</p>
       </div>
       <div id="pc-transfer-choices">
-        <p id="pc-transfer-selection" class="feedback">送るファイルを選んでください。1件128 MBまで。</p>
+        <p id="pc-transfer-selection" class="feedback">送るフォルダやファイルを選んでください。</p>
         <div id="pc-transfer-folder-heading" hidden>
           <button type="button" id="pc-transfer-folder-back">‹ ライブラリ</button>
           <h3 id="pc-transfer-folder-name"></h3>

@@ -139,6 +139,7 @@ function bindQueueGestures(list, getScrollArea, actions, reducedMotion) {
     }
     if (canSwipe && drag.row !== revealed) drag.row.querySelector(".queue-remove").hidden = true;
     actions.previewDrop?.(null);
+    actions.previewReorder?.(null);
     drag = null;
   }
 
@@ -147,14 +148,16 @@ function bindQueueGestures(list, getScrollArea, actions, reducedMotion) {
     const offset = event.clientY - drag.y + scrollArea.scrollTop - drag.scroll;
     actions.previewDrop?.(event);
     drag.target = Math.max(0, Math.min(drag.rows.length - 1, drag.index + Math.round(offset / drag.height)));
+    const visualOffset = actions.previewReorder?.(row.track, drag.target, event, offset) ?? offset;
     if (drag.group) {
       for (const item of drag.group) {
         item.dataset.gesture = "reorder";
-        item.style.setProperty("--queue-shift", offset + "px");
+        item.style.setProperty("--queue-shift", visualOffset + "px");
       }
       return;
     }
-    row.style.setProperty("--queue-shift", offset + "px");
+    row.style.setProperty("--queue-shift", visualOffset + "px");
+    if (actions.shiftNeighbors === false) return;
     for (const [index, neighbor] of drag.rows.entries()) {
       if (neighbor === row) continue;
       const shift = index > drag.index && index <= drag.target ? -drag.height :
